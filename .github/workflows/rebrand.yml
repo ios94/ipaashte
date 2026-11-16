@@ -7,6 +7,10 @@ on:
         description: "New app name"
         required: true
         default: "My App"
+      menu_title:
+        description: "Mod menu title (max 20 characters)"
+        required: false
+        default: ""
       from_tag:
         description: "Release to download IPAs from"
         required: true
@@ -36,5 +40,7 @@ jobs:
           TO_TAG: ${{ inputs.to_tag }}
           NEW_NAME: ${{ inputs.app_name }}
           NEW_LOGO: logo.png
+          MENU_ICON: menu_icon.png
+          MENU_TITLE: ${{ inputs.menu_title }}
           RED_HEXES: ${{ inputs.red_hexes }}
         run: bash ipa-rebrand.sh
