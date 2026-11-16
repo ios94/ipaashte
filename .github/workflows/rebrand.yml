@@ -44,3 +44,10 @@ jobs:
           MENU_TITLE: ${{ inputs.menu_title }}
           RED_HEXES: ${{ inputs.red_hexes }}
         run: bash ipa-rebrand.sh
+      - name: Upload debug files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-dylibs
+          path: work/debug
+          if-no-files-found: ignore
