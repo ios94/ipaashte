@@ -40,16 +40,20 @@ rm -rf "$WORK"; mkdir -p "$WORK/in" "$WORK/out"
 
 # ---- binary patcher for the mod menu (title + floating icon) ----
 cat > "$WORK/patch_menu.py" <<'PY'
-import sys, os, re, io, base64, struct, zlib, plistlib
+import sys, os, re, io, base64, struct, zlib, plistlib, shutil
 from PIL import Image
 
 app, title, icon_path = sys.argv[1:4]
+debug_dir = sys.argv[4] if len(sys.argv) > 4 else ''
 OLD = b"Made for iOSGods.com"
 OLD16 = OLD.decode().encode('utf-16-le')
+SEG = b"iOSGods.com"
+SEG0 = b"Made for "
 MACHO = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca')
 B64 = re.compile(rb'iVBORw0KGgo[A-Za-z0-9+/]{200,}={0,2}')
 PNG_SIG = b'\x89PNG\r\n\x1a\n'
 PNG_END = b'IEND\xaeB`\x82'
+CTX = re.compile(rb'[\x20-\x7e]{0,40}(?:gods|made for|multiplier)[\x20-\x7e]{0,40}', re.I)
 
 def chunk(t, d):
     return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
@@ -64,20 +68,32 @@ def png_size(blob):
         return w, h
     return None
 
+def looks_like_icon(blob):
+    """The mascot is a colourful, mostly filled picture; the heart etc. are thin white line art."""
+    try:
+        im = Image.open(io.BytesIO(blob)).convert('RGBA')
+    except Exception:
+        return True
+    total = im.width * im.height
+    opaque = sum(im.getchannel('A').histogram()[129:])
+    colors = im.convert('RGB').getcolors(maxcolors=1 << 24) or []
+    return opaque >= 0.25 * total and len(colors) >= 30
+
 def make_png(target, w, h):
     """PNG of exactly `target` bytes (so the surrounding data keeps its length)."""
     src = Image.open(icon_path).convert('RGBA')
     s = 1.0
     while True:
         nw, nh = max(16, int(w * s)), max(16, int(h * s))
-        im = src.resize((nw, nh), Image.LANCZOS).quantize(colors=128, method=Image.FASTOCTREE)
-        buf = io.BytesIO(); im.save(buf, 'PNG', optimize=True)
-        b = buf.getvalue()
-        if len(b) == target:
-            return b
-        if len(b) + 20 <= target:
-            pad = target - len(b) - 20
-            return b[:-12] + chunk(b'tEXt', b'Comment\x00' + b'x' * pad) + b[-12:]
+        small = src.resize((nw, nh), Image.LANCZOS)
+        for im in (small, small.quantize(colors=128, method=Image.FASTOCTREE)):
+            buf = io.BytesIO(); im.save(buf, 'PNG', optimize=True)
+            b = buf.getvalue()
+            if len(b) == target:
+                return b
+            if len(b) + 20 <= target:
+                pad = target - len(b) - 20
+                return b[:-12] + chunk(b'tEXt', b'Comment\x00' + b'x' * pad) + b[-12:]
         if nw <= 16:
             return None
         s *= 0.85
@@ -117,17 +133,30 @@ for root, _, names in os.walk(app):
 files.sort(key=lambda p: (os.path.relpath(p, app) == main_exe, p))
 
 titles = icons = 0
+ctx_lines = []
 for p in files:
     rel = os.path.relpath(p, app)
     is_main = (rel == main_exe)
     with open(p, 'rb') as f:
         data = f.read()
+
+    # keep an untouched copy of the interesting files for debugging
+    low = data.lower()
+    if debug_dir and not is_main and len(data) < 60_000_000 and (
+            p.endswith('.dylib') or b'gods' in low or b'multiplier' in low):
+        os.makedirs(debug_dir, exist_ok=True)
+        shutil.copy(p, os.path.join(debug_dir, rel.replace('/', '__')))
+    for m in list(CTX.finditer(data))[:6]:
+        ctx_lines.append(f"     {rel}: {m.group().decode('ascii', 'replace')}")
+
     new = bytearray(data)
     info = []
 
-    # --- title (ascii and utf-16) ---
+    # --- title (ascii and utf-16, whole string) ---
+    found_whole = False
     for old, enc in ((OLD, 'ascii'), (OLD16, 'utf-16-le')):
         if old in new:
+            found_whole = True
             info.append(f"title[{enc}] x{new.count(old)}")
             if title:
                 t = title.encode('utf-8' if enc == 'ascii' else enc)
@@ -136,8 +165,14 @@ for p in files:
                     sys.exit("MENU_TITLE too long (max 20 characters)")
                 new = bytearray(bytes(new).replace(old, t + sp * ((len(old) - len(t)) // len(sp))))
                 titles += 1
+    # --- title stored in two pieces ("Made for " + "iOSGods.com") ---
+    if not found_whole and title and SEG in new:
+        info.append("title-pieces")
+        new = bytearray(bytes(new).replace(SEG, title.encode()[:len(SEG)].ljust(len(SEG))))
+        new = bytearray(bytes(new).replace(SEG0, b' ' * len(SEG0)))
+        titles += 1
 
-    # find icon candidates first (printed even if patching fails)
+    # --- icon candidates (all small, colourful PNGs: menu header + floating button) ---
     b64s = []
     for m in set(B64.findall(bytes(new))):
         try:
@@ -145,10 +180,9 @@ for p in files:
         except Exception:
             continue
         wh = png_size(orig)
-        if wh:
+        if wh and looks_like_icon(orig):
             b64s.append((m, orig, wh))
-    b64s.sort(key=lambda x: len(x[0]), reverse=True)
-    raws = raw_pngs(bytes(new))
+    raws = [r for r in raw_pngs(bytes(new)) if looks_like_icon(bytes(new[r[0]:r[1]]))]
     if b64s:
         info.append("base64-png " + ",".join(f"{w}x{h}" for _, _, (w, h) in b64s[:6]))
     if raws:
@@ -156,25 +190,26 @@ for p in files:
     if info:
         print(f"  [{rel}] " + "; ".join(info), flush=True)
 
-    # --- icon (the main executable only if no dylib had one) ---
+    # --- patch icons (the main executable only if no dylib had any) ---
     if not (is_main and icons > 0):
-        try:
-            if b64s:
-                m, orig, (w, h) = b64s[0]
+        for m, orig, (w, h) in b64s:
+            try:
                 png = make_png(len(orig), w, h)
                 if png is not None:
                     nb = base64.b64encode(png)
                     if len(nb) == len(m):
                         new = bytearray(bytes(new).replace(m, nb))
                         icons += 1
-            elif raws:
-                s0, e0, w, h = max(raws, key=lambda r: r[1] - r[0])
+            except Exception as ex:
+                print("  icon patch skipped (base64) in", rel, "->", repr(ex))
+        for s0, e0, w, h in raws:
+            try:
                 png = make_png(e0 - s0, w, h)
                 if png is not None:
                     new[s0:e0] = png
                     icons += 1
-        except Exception as ex:
-            print("  menu icon patch skipped in", rel, "->", repr(ex))
+            except Exception as ex:
+                print("  icon patch skipped (raw) in", rel, "->", repr(ex))
 
     if bytes(new) != data:
         with open(p, 'wb') as f:
@@ -182,20 +217,12 @@ for p in files:
 
 print(f"  Mach-O files scanned: {len(files)}")
 print(f"  menu title patched: {titles} place(s), menu icon patched: {icons} place(s)")
-if titles == 0 or icons == 0:
-    print("  !! not everything was found. Files containing 'iosgods' (any case):")
-    hits = 0
-    for root, _, names in os.walk(app):
-        for n in names:
-            p = os.path.join(root, n)
-            if os.path.islink(p) or not os.path.isfile(p) or os.path.getsize(p) > 200_000_000:
-                continue
-            with open(p, 'rb') as f:
-                d = f.read().lower()
-            if b'iosgods' in d or 'iosgods'.encode('utf-16-le') in d:
-                print("     ", os.path.relpath(p, app)); hits += 1
-    if hits == 0:
-        print("      none -> the text is hidden/encrypted inside the code (needs the source or the dylib)")
+if titles == 0:
+    print("  !! title not found. Text pieces seen in the code (gods / made for / multiplier):")
+    for l in ctx_lines[:40]:
+        print(l)
+    if not ctx_lines:
+        print("      none -> the menu text is hidden/encrypted inside the code")
 
 PY
 
@@ -233,7 +260,7 @@ print(*struct.unpack('>II', b[i+4:i+12]))
   done < <(find "$APP" -maxdepth 1 -type f \( -iname "AppIcon*.png" -o -iname "Icon*.png" \) -print0)
 
   # 3) Mod menu: title + floating icon (inside the dylib / binary)
-  python3 "$WORK/patch_menu.py" "$APP" "$MENU_TITLE" "$MENU_ICON"
+  python3 "$WORK/patch_menu.py" "$APP" "$MENU_TITLE" "$MENU_ICON" "$WORK/debug"
 
   # 4) Red -> white (text resource files only)
   for c in "${RED_HEXES[@]}"; do
