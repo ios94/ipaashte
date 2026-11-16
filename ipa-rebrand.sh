@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ipa-rebrand.sh (Full Obfuscated Title + Blue Menu + Icon Patcher)
+# ipa-rebrand.sh (Deep Inspector & ARM64/Hex/Stack-String Patcher for libcatscrasharenaturbostars.dylib)
 
 set -euo pipefail
 
@@ -11,7 +11,7 @@ NEW_NAME="${NEW_NAME:-My App}"
 NEW_LOGO="${NEW_LOGO:-logo.png}"
 MENU_TITLE="${MENU_TITLE:-Ashte Mod}"
 MENU_ICON="${MENU_ICON:-menu_icon.png}"
-MENU_COLOR_HEX="${MENU_COLOR_HEX:-1E64E8}" # Blue HEX
+MENU_COLOR_HEX="${MENU_COLOR_HEX:-1E64E8}"
 ### ===================
 
 for cmd in gh zip unzip python3 perl; do
@@ -59,12 +59,6 @@ MACHO = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca')
 B64 = re.compile(rb'iVBORw0KGgo[A-Za-z0-9+/]{80,}={0,2}')
 PNG_SIG = b'\x89PNG\r\n\x1a\n'
 PNG_END = b'IEND\xaeB`\x82'
-
-IGNORE_SDKS = (
-    'adjustsdk', 'applovin', 'bidmachine', 'fbsdk', 'helpshift',
-    'hyprmx', 'ironsource', 'unityads', 'vungle', 'chartboost',
-    'admob', 'googlemobileads', 'crashlytics', 'firebase', 'appsflyer'
-)
 
 def chunk(t, d):
     return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
@@ -122,8 +116,25 @@ def raw_pngs(data):
         i = e
     return out
 
-def deep_patch_title(buf, new_title):
-    """Finds 'Made for iOSGods.com' in plain, split, UTF-16, Base64, and XOR-encrypted forms."""
+def inspect_dylib(data, name):
+    print(f"  --- INSPECTING {name} ({len(data)} bytes) ---")
+    # Search for any readable strings related to menu/title/author
+    strs = re.findall(rb'[\x20-\x7e]{5,}', data)
+    interesting = [s.decode('ascii', 'ignore') for s in strs if any(k in s.lower() for k in (
+        b'made', b'gods', b'ted2', b'menu', b'multiplier', b'credit', b'author', b'title', b'header', b'color', b'http'
+    ))]
+    for s in interesting[:35]:
+        print(f"    STR: {s}")
+
+    # Check if obfuscated strings exist (e.g. non-adjacent characters of 'iOSGods' or 'Made for')
+    for word in (b'iOSGods', b'Made for', b'Multiplier'):
+        # Check UTF-16 or spaced characters (e.g. M.a.d.e.)
+        spaced = b'.{0,3}'.join(bytes([c]) for c in word)
+        m = re.search(spaced, data)
+        if m:
+            print(f"    PATTERN MATCH ({word.decode()}): {data[m.start():m.end()+10]!r}")
+
+def patch_title_deep(buf, new_title):
     hits = 0
     tb = new_title.encode('utf-8')
     rep20 = tb[:20].ljust(20, b' ')
@@ -137,7 +148,6 @@ def deep_patch_title(buf, new_title):
     # 2) Split ("Made for " + "iOSGods.com")
     for m in list(re.finditer(rb'iOSGods\.com', bytes(buf), re.I)):
         s, e = m.start(), m.end()
-        # Skip URLs like https://iosgods.com
         if s >= 3 and bytes(buf[s-3:s]) == b'://':
             continue
         buf[s:e] = tb[:e-s].ljust(e-s, b' ')
@@ -152,65 +162,80 @@ def deep_patch_title(buf, new_title):
         hits += buf.count(old16)
         buf[:] = bytes(buf).replace(old16, rep16)
 
-    # 4) Base64 encoded
-    b64_old = base64.b64encode(b"Made for iOSGods.com")
-    if b64_old in buf:
-        b64_new = base64.b64encode(rep20)
-        if len(b64_new) == len(b64_old):
-            buf[:] = bytes(buf).replace(b64_old, b64_new)
-            hits += 1
-
-    # 5) Single-byte XOR obfuscation (key 1..255)
+    # 4) Single-byte XOR (1..255)
     raw = bytes(buf)
     for target_str in (b"Made for iOSGods.com", b"iOSGods.com"):
         rep_str = tb[:len(target_str)].ljust(len(target_str), b' ')
         for key in range(1, 256):
             x_target = bytes(b ^ key for b in target_str)
-            pos = 0
-            while True:
-                idx = raw.find(x_target, pos)
-                if idx < 0:
-                    break
+            idx = raw.find(x_target)
+            if idx >= 0:
                 x_rep = bytes(b ^ key for b in rep_str)
                 buf[idx:idx+len(target_str)] = x_rep
                 raw = bytes(buf)
                 hits += 1
-                pos = idx + len(target_str)
 
-    # 6) Rolling/Incremental XOR obfuscation (key + index)
-    raw = bytes(buf)
+    # 5) Multi-byte XOR (2-byte and 4-byte repeating XOR key)
+    # In Ted2's obfuscated C++ strings (obfuscate.h), a repeating key is used!
     target_str = b"Made for iOSGods.com"
-    for key in range(1, 256):
-        x_target = bytes((b ^ ((key + i) & 0xFF)) for i, b in enumerate(target_str))
-        idx = raw.find(x_target)
-        if idx >= 0:
-            x_rep = bytes((b ^ ((key + i) & 0xFF)) for i, b in enumerate(rep20))
-            buf[idx:idx+20] = x_rep
-            raw = bytes(buf)
-            hits += 1
+    rep_str = rep20
+    raw = bytes(buf)
+    for klen in (2, 4, 8):
+        # Slide window over binary to see if any 20-byte block XORs with target_str to produce a repeating klen key!
+        t_len = len(target_str)
+        for i in range(len(raw) - t_len):
+            # Derive candidate key from first klen bytes
+            key = bytes(raw[i + j] ^ target_str[j] for j in range(klen))
+            if all(b == 0 for b in key):
+                continue
+            # Check if remaining bytes match the repeating key
+            ok = True
+            for j in range(klen, t_len):
+                if (raw[i + j] ^ target_str[j]) != key[j % klen]:
+                    ok = False
+                    break
+            if ok:
+                print(f"    [!] Found {klen}-byte XOR encrypted title at offset {hex(i)} with key {key.hex()}!")
+                enc_new = bytes(rep_str[j] ^ key[j % klen] for j in range(t_len))
+                buf[i:i+t_len] = enc_new
+                raw = bytes(buf)
+                hits += 1
 
     return hits
 
-def patch_menu_blue(buf):
-    """Safely turns Ted2/iOSGods red menu into Blue inside the menu binary ONLY."""
+def patch_colors_deep(buf):
     c_hits = 0
     b_new = f"{BLUE_R:02X}{BLUE_G:02X}{BLUE_B:02X}".encode('ascii')
     h_new = f"{HDR_R:02X}{HDR_G:02X}{HDR_B:02X}".encode('ascii')
 
-    # 1) Hex strings
-    for hr in [b"E72E2A", b"FF0000", b"E50914", b"FF3B30", b"D92B27", b"E74C3C", b"F1322E", b"EB332E"]:
+    # 1) ASCII Hex strings
+    for hr in [b"E72E2A", b"FF0000", b"E50914", b"FF3B30", b"D92B27", b"E74C3C"]:
         for pat in (hr, hr.lower()):
             if pat in buf:
                 c_hits += buf.count(pat)
                 buf[:] = bytes(buf).replace(pat, b_new)
-    for hr in [b"BD2522", b"C0392B", b"961E1B", b"B0231F", b"A8201D"]:
+    for hr in [b"BD2522", b"C0392B", b"961E1B", b"B0231F"]:
         for pat in (hr, hr.lower()):
             if pat in buf:
                 c_hits += buf.count(pat)
                 buf[:] = bytes(buf).replace(pat, h_new)
 
-    # 2) Double & Float RGB values used ONLY inside iGameGod/menu dylib (safe because we skip main game exe!)
-    for r_val in (231, 232, 235, 189, 190, 194):
+    # 2) Raw Little-Endian 3-byte RGB values (UIColorFromHEX 0xE72E2A -> \x2A\x2E\xE7)
+    raw_reds = [
+        (b'\x2A\x2E\xE7', bytes([BLUE_B, BLUE_G, BLUE_R])), # 0xE72E2A (Ted2 Body Red)
+        (b'\x22\x25\xBD', bytes([HDR_B, HDR_G, HDR_R])),    # 0xBD2522 (Ted2 Header Red)
+        (b'\x2E\x33\xEB', bytes([BLUE_B, BLUE_G, BLUE_R])), # 0xEB332E
+        (b'\x27\x2B\xD9', bytes([BLUE_B, BLUE_G, BLUE_R])), # 0xD92B27
+    ]
+    for old_rgb, new_rgb in raw_reds:
+        if old_rgb in buf:
+            cnt = buf.count(old_rgb)
+            print(f"    [!] Replaced raw RGB {old_rgb.hex()} -> {new_rgb.hex()} ({cnt}x)")
+            c_hits += cnt
+            buf[:] = bytes(buf).replace(old_rgb, new_rgb)
+
+    # 3) Double & Float RGB components (231/255, 46/255, 42/255 and 189/255, 37/255, 34/255)
+    for r_val in (231, 235, 189, 194):
         for fmt in ('<d', '<f'):
             old_b = struct.pack(fmt, r_val / 255.0)
             if old_b in buf:
@@ -219,7 +244,7 @@ def patch_menu_blue(buf):
                 c_hits += buf.count(old_b)
                 buf[:] = bytes(buf).replace(old_b, new_b)
 
-    for g_val in (46, 48, 51, 37, 38, 42):
+    for g_val in (46, 51, 37, 42):
         for fmt in ('<d', '<f'):
             old_b = struct.pack(fmt, g_val / 255.0)
             if old_b in buf:
@@ -228,7 +253,7 @@ def patch_menu_blue(buf):
                 c_hits += buf.count(old_b)
                 buf[:] = bytes(buf).replace(old_b, new_b)
 
-    for b_val in (42, 44, 46, 34, 35, 38):
+    for b_val in (42, 46, 34, 38):
         for fmt in ('<d', '<f'):
             old_b = struct.pack(fmt, b_val / 255.0)
             if old_b in buf:
@@ -239,12 +264,6 @@ def patch_menu_blue(buf):
 
     return c_hits
 
-try:
-    with open(os.path.join(app, 'Info.plist'), 'rb') as f:
-        main_exe = plistlib.load(f).get('CFBundleExecutable', '')
-except Exception:
-    main_exe = ''
-
 files = []
 for root, _, names in os.walk(app):
     for n in names:
@@ -254,39 +273,26 @@ for root, _, names in os.walk(app):
         with open(p, 'rb') as f:
             if f.read(4) in MACHO:
                 files.append(p)
-files.sort(key=lambda p: (os.path.relpath(p, app) == main_exe, p))
 
 titles = icons = colors = 0
 for p in files:
     rel = os.path.relpath(p, app)
     rel_low = rel.lower()
-    is_main = (rel == main_exe)
 
-    if any(sdk in rel_low for sdk in IGNORE_SDKS):
+    # Focus specifically on the injected mod menu dylib (libcatscrasharenaturbostars.dylib) or any .dylib
+    if not (p.endswith('.dylib') or 'libcats' in rel_low):
         continue
 
     with open(p, 'rb') as f:
         data = f.read()
 
-    low = data.lower()
-    is_menu_bin = 'igamegod' in rel_low or p.endswith('.dylib') or b'iosgods' in low or b'modslider' in low
-
-    if not is_menu_bin and not is_main:
-        continue
-
+    inspect_dylib(data, rel)
     new = bytearray(data)
 
-    # 1) Deep Title Patch (Plain + Split + Base64 + XOR)
-    t_hits = deep_patch_title(new, title)
-    titles += t_hits
+    t_hits = patch_title_deep(new, title)
+    c_hits = patch_colors_deep(new)
 
-    # 2) Blue Color Patch (ONLY on non-main menu dylibs/iGameGod so main exe never crashes!)
-    c_hits = 0
-    if not is_main and (is_menu_bin or t_hits > 0):
-        c_hits = patch_menu_blue(new)
-        colors += c_hits
-
-    # 3) Icon Patch (Base64 & Raw PNG)
+    # Patch Icons inside this dylib
     b64s = []
     for m in set(B64.findall(bytes(new))):
         try:
@@ -299,26 +305,28 @@ for p in files:
     raws = [r for r in raw_pngs(bytes(new)) if looks_like_icon(bytes(new[r[0]:r[1]]))]
 
     i_hits = 0
-    if not is_main or (icons == 0 and t_hits > 0):
-        for m, orig, (w, h) in b64s:
-            try:
-                png = make_png(len(orig), w, h)
-                if png is not None:
-                    nb = base64.b64encode(png)
-                    if len(nb) == len(m):
-                        new = bytearray(bytes(new).replace(m, nb))
-                        i_hits += 1
-            except Exception:
-                pass
-        for s0, e0, w, h in raws:
-            try:
-                png = make_png(e0 - s0, w, h)
-                if png is not None:
-                    new[s0:e0] = png
+    for m, orig, (w, h) in b64s:
+        try:
+            png = make_png(len(orig), w, h)
+            if png is not None:
+                nb = base64.b64encode(png)
+                if len(nb) == len(m):
+                    new = bytearray(bytes(new).replace(m, nb))
                     i_hits += 1
-            except Exception:
-                pass
-        icons += i_hits
+        except Exception:
+            pass
+    for s0, e0, w, h in raws:
+        try:
+            png = make_png(e0 - s0, w, h)
+            if png is not None:
+                new[s0:e0] = png
+                i_hits += 1
+        except Exception:
+            pass
+
+    titles += t_hits
+    icons += i_hits
+    colors += c_hits
 
     if bytes(new) != data:
         with open(p, 'wb') as f:
@@ -366,10 +374,10 @@ else:
     resize "$NEW_LOGO" "$w" "$h" "$f.new" && mv "$f.new" "$f"
   done < <(find "$APP" -maxdepth 1 -type f \( -iname "AppIcon*.png" -o -iname "Icon*.png" \) -print0)
 
-  # 3) Deep Patch Mod Menu (Title + Icon + Blue Color)
+  # 3) Deep Patch Mod Menu dylib
   python3 "$WORK/patch_menu.py" "$APP" "$MENU_TITLE" "$MENU_ICON" "$MENU_COLOR_HEX" "$WORK/debug"
 
-  # 4) Re-pack cleanly
+  # 4) Re-pack
   (cd "$T" && zip -qry "$WORK/out/$fname" Payload)
 done
 
