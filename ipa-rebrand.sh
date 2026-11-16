@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
-# ipa-rebrand.sh
-# Downloads every .ipa from release FROM_TAG, rebrands it, uploads to release TO_TAG.
+# ipa-rebrand.sh (Blue Menu + Deep Title Patcher + Anti-Crash)
 
 set -euo pipefail
 
-### ===== SETTINGS (edit these, or pass as environment variables) ====
+### ===== SETTINGS ====
 REPO="${REPO:-USERNAME/REPO}"
 FROM_TAG="${FROM_TAG:-V.1}"
 TO_TAG="${TO_TAG:-V.5}"
-NEW_NAME="${NEW_NAME:-My App}"            # new app name
-NEW_LOGO="${NEW_LOGO:-logo.png}"          # app icon (opaque PNG, 1024x1024)
-MENU_TITLE="${MENU_TITLE:-My Mod Menu}"   # replaces "Made for iOSGods.com" (max 20 chars)
-MENU_ICON="${MENU_ICON:-menu_icon.png}"   # floating menu icon (transparent PNG)
-read -r -a RED_HEXES <<< "${RED_HEXES:-FF0000 E50914 FF3B30}"   # reds to replace (no #)
-WHITE_HEX="FFFFFF"
-### =================================================================
+NEW_NAME="${NEW_NAME:-My App}"
+NEW_LOGO="${NEW_LOGO:-logo.png}"
+MENU_TITLE="${MENU_TITLE:-Ashte Mod}"
+MENU_ICON="${MENU_ICON:-menu_icon.png}"
+MENU_COLOR_HEX="${MENU_COLOR_HEX:-1E64E8}" # Default nice Blue
+### ===================
 
 for cmd in gh zip unzip python3 perl; do
   command -v "$cmd" >/dev/null || { echo "Missing: $cmd"; exit 1; }
@@ -23,7 +21,7 @@ python3 -c "import PIL" 2>/dev/null || pip3 install --quiet pillow
 [ -f "$NEW_LOGO" ] || { echo "Logo not found: $NEW_LOGO"; exit 1; }
 [ -f "$MENU_ICON" ] || MENU_ICON="$NEW_LOGO"
 
-resize() { # src w h dst (Pillow)
+resize() {
   python3 - "$1" "$2" "$3" "$4" <<'PYR'
 import sys
 from PIL import Image
@@ -35,22 +33,28 @@ PYR
 WORK="$(pwd)/work"
 rm -rf "$WORK"; mkdir -p "$WORK/in" "$WORK/out"
 
-# ---- binary patcher for the mod menu (title + floating icon) ----
+# ---- Binary patcher: Menu Title + Menu Icon + Red-to-Blue Menu Color ----
 cat > "$WORK/patch_menu.py" <<'PY'
 import sys, os, re, io, base64, struct, zlib, plistlib, shutil
 from PIL import Image
 
-app, title, icon_path = sys.argv[1:4]
-debug_dir = sys.argv[4] if len(sys.argv) > 4 else ''
+app, title, icon_path, hex_col = sys.argv[1:5]
+debug_dir = sys.argv[5] if len(sys.argv) > 5 else ''
 
 if not title.strip():
-    title = "My Mod Menu"
+    title = "Ashte Mod"
+
+hex_col = hex_col.lstrip('#').strip()
+if len(hex_col) != 6:
+    hex_col = "1E64E8"
+BLUE_R = int(hex_col[0:2], 16)
+BLUE_G = int(hex_col[2:4], 16)
+BLUE_B = int(hex_col[4:6], 16)
 
 MACHO = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca')
 B64 = re.compile(rb'iVBORw0KGgo[A-Za-z0-9+/]{200,}={0,2}')
 PNG_SIG = b'\x89PNG\r\n\x1a\n'
 PNG_END = b'IEND\xaeB`\x82'
-CTX = re.compile(rb'[\x20-\x7e]{0,40}(?:gods|made for|multiplier)[\x20-\x7e]{0,40}', re.I)
 
 def chunk(t, d):
     return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
@@ -108,24 +112,141 @@ def raw_pngs(data):
         i = e
     return out
 
-def patch_cstr(buf, target_bytes, new_str):
-    """Replaces C-strings in-place up to the null byte without breaking binary offsets."""
-    count = 0
+def patch_title_everywhere(buf, new_title):
+    """Finds and replaces 'Made for iOSGods.com' in plain, case-insensitive, split, XOR, and C-string forms."""
+    hits = 0
+    tb = new_title.encode('utf-8')
+
+    # 1) Regex search for any "Made for ... iOSGods.com" up to null byte
+    for m in list(re.finditer(rb'Made for [^\x00]{3,25}?iOSGods\.com', bytes(buf), re.I)):
+        s, e = m.start(), m.end()
+        length = e - s
+        buf[s:e] = tb[:length].ljust(length, b' ')
+        hits += 1
+
+    # 2) Format string variations: "Made for %@" or "Made for %s"
+    for m in list(re.finditer(rb'Made for %[@s][!]?', bytes(buf), re.I)):
+        s, e = m.start(), m.end()
+        length = e - s
+        # Replace without keeping %@ so ObjC doesn't even read the argument, or pad safely
+        buf[s:e] = tb[:length].ljust(length, b' ')
+        hits += 1
+
+    # 3) Split pieces ("Made for \x00" and "iOSGods.com\x00")
+    if hits == 0:
+        for m in list(re.finditer(rb'iOSGods\.com', bytes(buf), re.I)):
+            s, e = m.start(), m.end()
+            # Check if preceded by "Made for " nearby
+            mf = bytes(buf).find(b"Made for \x00")
+            if mf >= 0:
+                p1 = tb[:9].ljust(9, b' ')
+                p2 = tb[9:20].ljust(11, b' ')
+                buf[mf:mf+9] = p1
+                buf[s:e] = p2
+            else:
+                buf[s:e] = tb[:11].ljust(11, b' ')
+            hits += 1
+
+    # 4) Single-byte XOR obfuscation scan (commonly used in encrypted iOSGods dylibs)
+    target_plain = b"Made for iOSGods.com"
+    rep_plain = tb[:20].ljust(20, b' ')
+    raw_bytes = bytes(buf)
+    for key in range(1, 256):
+        xored_target = bytes(b ^ key for b in target_plain)
+        pos = raw_bytes.find(xored_target)
+        if pos >= 0:
+            xored_rep = bytes(b ^ key for b in rep_plain)
+            buf[pos:pos+20] = xored_rep
+            raw_bytes = bytes(buf)
+            hits += 1
+
+    return hits
+
+def patch_red_to_blue(buf):
+    """Patches Ted2 / iOSGods Mod Menu red colors into Blue inside the Mach-O binary."""
+    c_hits = 0
+
+    # A) Hex string colors inside binary (case-insensitive)
+    hex_reds = [
+        b"E72E2A", b"BD2522", b"FF0000", b"E50914", b"FF3B30",
+        b"D92B27", b"C0392B", b"E74C3C", b"961E1B", b"B0231F"
+    ]
+    new_hex = f"{BLUE_R:02X}{BLUE_G:02X}{BLUE_B:02X}".encode('ascii')
+    for hr in hex_reds:
+        for pat in (hr, hr.lower()):
+            if pat in buf:
+                c_hits += buf.count(pat)
+                buf[:] = bytes(buf).replace(pat, new_hex)
+
+    # B) Objective-C UIColor selector: "redColor\x00" (8 chars + null) -> "cyanColor" or swap RGB floats
+    # Note: "redColor" is 8 chars; "tanColor" or "blueColor" -> if "redColor\x00\x00" has padding, we can write "blueColor\x00"!
     idx = 0
-    tb = new_str.encode('utf-8')
     while True:
-        pos = buf.find(target_bytes, idx)
+        pos = bytes(buf).find(b"redColor\x00", idx)
         if pos < 0:
             break
-        end = buf.find(b'\x00', pos)
-        if end < 0 or end - pos > 60:
-            end = pos + len(target_bytes)
-        avail = end - pos
-        rep = tb[:avail].ljust(avail, b' ')
-        buf[pos:end] = rep
-        count += 1
-        idx = end
-    return count
+        if pos + 10 <= len(buf) and buf[pos+9] == 0:
+            buf[pos:pos+10] = b"blueColor\x00"
+            c_hits += 1
+        idx = pos + 9
+
+    # C) IEEE-754 Double & Float constants used by colorWithRed:green:blue:alpha:
+    # In Ted2 Menu & Screenshot:
+    #   Body Red   = RGB(231, 46, 42) or RGB(235, 51, 46) -> R/255 ~ 0.905..0.925, G/255 ~ 0.16..0.21, B/255 ~ 0.15..0.19
+    #   Header Red = RGB(189, 37, 34) or RGB(194, 42, 38) -> R/255 ~ 0.741..0.765, G/255 ~ 0.14..0.17, B/255 ~ 0.13..0.16
+    # Because R is high (~0.74 - 0.96) and B is low (~0.13 - 0.25), if we swap the R constant with a low value (0.12)
+    # and the B constant with a high value (0.91), ANY red RGB call turns into a rich Blue!
+    red_r_ints = [231, 232, 233, 234, 235, 189, 190, 191, 192, 193, 194, 220, 210, 200, 240, 250]
+    red_g_ints = [46, 47, 48, 49, 50, 51, 52, 37, 38, 39, 40, 41, 42, 43]
+    red_b_ints = [42, 43, 44, 45, 46, 34, 35, 36, 37, 38, 30, 32]
+
+    # Replace exact Double (8-byte) & Float (4-byte) representations of X / 255.0 and X / 100.0
+    # High Red -> Low Red (Blue R component: BLUE_R / 255.0)
+    for r_val in red_r_ints:
+        for denom in (255.0,):
+            old_d = struct.pack('<d', r_val / denom)
+            new_d = struct.pack('<d', BLUE_R / 255.0)
+            if old_d in buf:
+                c_hits += buf.count(old_d)
+                buf[:] = bytes(buf).replace(old_d, new_d)
+            old_f = struct.pack('<f', r_val / denom)
+            new_f = struct.pack('<f', BLUE_R / 255.0)
+            if old_f in buf:
+                c_hits += buf.count(old_f)
+                buf[:] = bytes(buf).replace(old_f, new_f)
+
+    # Low Green -> Blue G component (BLUE_G / 255.0)
+    for g_val in red_g_ints:
+        old_d = struct.pack('<d', g_val / 255.0)
+        new_d = struct.pack('<d', BLUE_G / 255.0)
+        if old_d in buf:
+            c_hits += buf.count(old_d)
+            buf[:] = bytes(buf).replace(old_d, new_d)
+
+    # Low Blue -> High Blue (BLUE_B / 255.0)
+    for b_val in red_b_ints:
+        old_d = struct.pack('<d', b_val / 255.0)
+        new_d = struct.pack('<d', BLUE_B / 255.0)
+        if old_d in buf:
+            c_hits += buf.count(old_d)
+            buf[:] = bytes(buf).replace(old_d, new_d)
+
+    # Also check common decimal literals (e.g. 0.90, 0.91, 0.92, 0.89, 0.74, 0.75, 0.76 for R; 0.16, 0.17, 0.18, 0.14, 0.15 for B)
+    for dec_r in (0.88, 0.89, 0.90, 0.91, 0.92, 0.93, 0.74, 0.75, 0.76, 0.77, 0.78):
+        old_d = struct.pack('<d', dec_r)
+        new_d = struct.pack('<d', 0.12)
+        if old_d in buf:
+            c_hits += buf.count(old_d)
+            buf[:] = bytes(buf).replace(old_d, new_d)
+
+    for dec_b in (0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20):
+        old_d = struct.pack('<d', dec_b)
+        new_d = struct.pack('<d', 0.92)
+        if old_d in buf:
+            c_hits += buf.count(old_d)
+            buf[:] = bytes(buf).replace(old_d, new_d)
+
+    return c_hits
 
 try:
     with open(os.path.join(app, 'Info.plist'), 'rb') as f:
@@ -144,8 +265,7 @@ for root, _, names in os.walk(app):
                 files.append(p)
 files.sort(key=lambda p: (os.path.relpath(p, app) == main_exe, p))
 
-titles = icons = 0
-ctx_lines = []
+titles = icons = colors = 0
 for p in files:
     rel = os.path.relpath(p, app)
     is_main = (rel == main_exe)
@@ -157,52 +277,26 @@ for p in files:
             p.endswith('.dylib') or b'gods' in low or b'multiplier' in low):
         os.makedirs(debug_dir, exist_ok=True)
         shutil.copy(p, os.path.join(debug_dir, rel.replace('/', '__')))
-    for m in list(CTX.finditer(data))[:6]:
-        ctx_lines.append(f"     {rel}: {m.group().decode('ascii', 'replace')}")
 
     new = bytearray(data)
-    t_hits = 0
 
-    # 1) Patch all standard & format-string variations of "Made for iOSGods.com"
-    for pat in (
-        b"Made for iOSGods.com",
-        b"Made for iosgods.com",
-        b"Made for %@!",
-        b"Made for %@",
-    ):
-        t_hits += patch_cstr(new, pat, title)
-
-    # 2) Handle split strings ("Made for " + "iOSGods.com")
-    if t_hits == 0 and (b"iOSGods.com" in new or b"iosgods.com" in new):
-        tb = title.encode('utf-8')
-        if b"Made for " in new and len(tb) > 11:
-            p1 = tb[:9].ljust(9, b' ')
-            p2 = tb[9:20].ljust(11, b' ')
-            new = bytearray(bytes(new).replace(b"Made for ", p1).replace(b"iOSGods.com", p2).replace(b"iosgods.com", p2))
-            t_hits += 1
-        else:
-            new = bytearray(bytes(new).replace(b"Made for ", b" " * 9))
-            t_hits += patch_cstr(new, b"iOSGods.com", title)
-            t_hits += patch_cstr(new, b"iosgods.com", title)
-
-    # 3) Handle UTF-16LE encoded strings
-    old16 = "Made for iOSGods.com".encode('utf-16-le')
-    if old16 in new:
-        rep16 = title[:20].ljust(20).encode('utf-16-le')
-        new = bytearray(bytes(new).replace(old16, rep16))
-        t_hits += 1
-
-    # 4) Handle Base64 encoded "Made for iOSGods.com" (TWFkZSBmb3IgaU9TR29kcy5jb20=)
-    b64_old = base64.b64encode(b"Made for iOSGods.com")
-    if b64_old in new:
-        b64_new = base64.b64encode(title[:20].ljust(20).encode('utf-8'))
-        if len(b64_new) == len(b64_old):
-            new = bytearray(bytes(new).replace(b64_old, b64_new))
-            t_hits += 1
-
+    # 1) Patch Title
+    t_hits = patch_title_everywhere(new, title)
     titles += t_hits
 
-    # --- Find & Patch Icons ---
+    # Identify if this Mach-O is the Mod Menu dylib
+    is_menu_bin = (
+        p.endswith('.dylib') or b'modslider' in low or b'iosgods' in low
+        or b'multiplier' in low or t_hits > 0
+    ) and b'igamegod' not in low and not is_main
+
+    # 2) Patch Red Menu Colors -> Blue inside the Mod Menu dylib
+    c_hits = 0
+    if is_menu_bin:
+        c_hits = patch_red_to_blue(new)
+        colors += c_hits
+
+    # 3) Patch Floating & Header Icons
     b64s = []
     for m in set(B64.findall(bytes(new))):
         try:
@@ -214,8 +308,7 @@ for p in files:
             b64s.append((m, orig, wh))
     raws = [r for r in raw_pngs(bytes(new)) if looks_like_icon(bytes(new[r[0]:r[1]]))]
 
-    is_menu_bin = (b'modslider' in low or b'iosgods' in low or b'multiplier' in low or t_hits > 0) and b'igamegod' not in low
-    if is_menu_bin and not (is_main and icons > 0):
+    if (is_menu_bin or (is_main and icons == 0 and t_hits > 0)):
         for m, orig, (w, h) in b64s:
             try:
                 png = make_png(len(orig), w, h)
@@ -224,28 +317,23 @@ for p in files:
                     if len(nb) == len(m):
                         new = bytearray(bytes(new).replace(m, nb))
                         icons += 1
-            except Exception as ex:
-                print("  icon patch skipped (base64) in", rel, "->", repr(ex))
+            except Exception:
+                pass
         for s0, e0, w, h in raws:
             try:
                 png = make_png(e0 - s0, w, h)
                 if png is not None:
                     new[s0:e0] = png
                     icons += 1
-            except Exception as ex:
-                print("  icon patch skipped (raw) in", rel, "->", repr(ex))
+            except Exception:
+                pass
 
     if bytes(new) != data:
         with open(p, 'wb') as f:
             f.write(bytes(new))
-        print(f"  [Patched {rel}] title hits: {t_hits}, icons patched: {icons}", flush=True)
+        print(f"  [Patched {rel}] titles: {t_hits}, icons: {icons}, blue-color patches: {c_hits}", flush=True)
 
-print(f"  Mach-O files scanned: {len(files)}")
-print(f"  menu title patched: {titles} place(s), menu icon patched: {icons} place(s)")
-if titles == 0:
-    print("  !! title not found. Text pieces seen in the code (gods / made for / multiplier):")
-    for l in ctx_lines[:40]:
-        print(l)
+print(f"  Summary -> titles: {titles}, icons: {icons}, color patches: {colors}")
 PY
 
 echo "== Downloading IPAs from $FROM_TAG"
@@ -258,31 +346,21 @@ for ipa in "$WORK"/in/*.ipa; do
   unzip -q "$ipa" -d "$T"
   APP="$(ls -d "$T"/Payload/*.app | head -n1)"
 
-  # 1) App name + Force custom icon in Info.plist
-  resize "$NEW_LOGO" 120 120 "$APP/AppIcon60x60@2x.png"
-  resize "$NEW_LOGO" 180 180 "$APP/AppIcon60x60@3x.png"
-  resize "$NEW_LOGO" 152 152 "$APP/AppIcon76x76@2x~ipad.png"
-
+  # 1) App name
   python3 - "$APP/Info.plist" "$NEW_NAME" <<'PY'
 import plistlib, sys
 path, name = sys.argv[1:3]
 with open(path, 'rb') as f:
-    d = plistlib.load(f)
+    raw = f.read()
+is_bin = raw.startswith(b'bplist')
+d = plistlib.loads(raw)
 d['CFBundleDisplayName'] = name
 d['CFBundleName'] = name
-icon_dict = {
-    'CFBundlePrimaryIcon': {
-        'CFBundleIconFiles': ['AppIcon60x60', 'AppIcon76x76'],
-        'UIPrerenderedIcon': True
-    }
-}
-d['CFBundleIcons'] = icon_dict
-d['CFBundleIcons~ipad'] = icon_dict
 with open(path, 'wb') as f:
-    plistlib.dump(d, f, fmt=plistlib.FMT_BINARY)
+    plistlib.dump(d, f, fmt=plistlib.FMT_BINARY if is_bin else plistlib.FMT_XML)
 PY
 
-  # 2) App icon (replace all existing icon PNGs at their exact dimensions)
+  # 2) App icon
   while IFS= read -r -d '' f; do
     read -r w h < <(python3 -c "
 import struct, sys
@@ -296,61 +374,23 @@ else:
     resize "$NEW_LOGO" "$w" "$h" "$f.new" && mv "$f.new" "$f"
   done < <(find "$APP" -maxdepth 1 -type f \( -iname "AppIcon*.png" -o -iname "Icon*.png" \) -print0)
 
-  # 3) Mod menu: title + floating icon (inside the dylib / binary)
-  python3 "$WORK/patch_menu.py" "$APP" "$MENU_TITLE" "$MENU_ICON" "$WORK/debug"
+  # 3) Mod menu: title + floating icon + Red-to-Blue color patch
+  python3 "$WORK/patch_menu.py" "$APP" "$MENU_TITLE" "$MENU_ICON" "$MENU_COLOR_HEX" "$WORK/debug"
 
-  # 4) Red -> white (text resource files + binary/XML plists)
-  for c in "${RED_HEXES[@]}"; do
-    find "$APP" -type f \( -name "*.json" -o -name "*.css" -o -name "*.js" \
-      -o -name "*.html" -o -name "*.strings" \) \
-      -exec perl -pi -e "s/#$c/#$WHITE_HEX/gi" {} +
+  # 4) Red -> Blue in any plain text resource files (.json, .css, .js, .html)
+  for c in FF0000 E50914 FF3B30 E72E2A BD2522; do
+    find "$APP" -type f \( -name "*.json" -o -name "*.css" -o -name "*.js" -o -name "*.html" \) \
+      -exec perl -pi -e "s/#$c/#$MENU_COLOR_HEX/gi" {} +
   done
 
-  python3 - "$APP" "$WHITE_HEX" "${RED_HEXES[@]}" <<'PY'
-import os, sys, re, plistlib
+  # 5) Re-sign modified Mach-O binaries with ldid (prevents crash)
+  if command -v ldid >/dev/null 2>&1; then
+    echo "  Re-signing dylibs and app bundle with ldid..."
+    find "$APP" -type f \( -name "*.dylib" -o -path "*/Frameworks/*.framework/*" \) -exec ldid -S {} + 2>/dev/null || true
+    ldid -S "$APP" 2>/dev/null || true
+  fi
 
-app, white, reds = sys.argv[1], sys.argv[2], sys.argv[3:]
-pattern = re.compile(r'#(' + '|'.join(re.escape(r) for r in reds) + r')\b', re.I)
-
-def replace_in_obj(obj):
-    changed = False
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            nv, c = replace_in_obj(v)
-            if c:
-                obj[k] = nv
-                changed = True
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            nv, c = replace_in_obj(v)
-            if c:
-                obj[i] = nv
-                changed = True
-    elif isinstance(obj, str):
-        new_s, n = pattern.subn('#' + white, obj)
-        if n > 0:
-            return new_s, True
-    return obj, changed
-
-for root, _, names in os.walk(app):
-    for n in names:
-        if not n.endswith('.plist') or n == 'Info.plist':
-            continue
-        p = os.path.join(root, n)
-        try:
-            with open(p, 'rb') as f:
-                raw = f.read()
-            is_bin = raw.startswith(b'bplist')
-            data = plistlib.loads(raw)
-            data, changed = replace_in_obj(data)
-            if changed:
-                with open(p, 'wb') as f:
-                    plistlib.dump(data, f, fmt=plistlib.FMT_BINARY if is_bin else plistlib.FMT_XML)
-        except Exception:
-            pass
-PY
-
-  # 5) Re-pack
+  # 6) Re-pack
   (cd "$T" && zip -qry "$WORK/out/$fname" Payload)
 done
 
