@@ -26,15 +26,13 @@ python3 -c "import PIL" 2>/dev/null || pip3 install --quiet pillow
 [ -f "$NEW_LOGO" ] || { echo "Logo not found: $NEW_LOGO"; exit 1; }
 [ -f "$MENU_ICON" ] || MENU_ICON="$NEW_LOGO"
 
-IM="$(command -v magick || command -v convert || true)"
-resize() { # src w h dst
-  if command -v sips >/dev/null; then
-    sips -z "$3" "$2" "$1" --out "$4" >/dev/null
-  elif [ -n "$IM" ]; then
-    "$IM" "$1" -resize "${2}x${3}!" "$4"
-  else
-    echo "Need sips (macOS) or ImageMagick"; exit 1
-  fi
+resize() { # src w h dst  (Pillow, works on any system)
+  python3 - "$1" "$2" "$3" "$4" <<'PYR'
+import sys
+from PIL import Image
+src, w, h, dst = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+Image.open(src).convert("RGBA").resize((w, h), Image.LANCZOS).save(dst, "PNG")
+PYR
 }
 
 WORK="$(pwd)/work"
