@@ -40,7 +40,7 @@ rm -rf "$WORK"; mkdir -p "$WORK/in" "$WORK/out"
 
 # ---- binary patcher for the mod menu (title + floating icon) ----
 cat > "$WORK/patch_menu.py" <<'PY'
-import sys, os, re, io, base64, struct, zlib
+import sys, os, re, io, base64, struct, zlib, plistlib
 from PIL import Image
 
 app, title, icon_path = sys.argv[1:4]
@@ -55,13 +55,14 @@ def chunk(t, d):
     return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
 
 def png_size(blob):
-    try:
-        return Image.open(io.BytesIO(blob)).size
-    except Exception:
-        i = blob.find(b'IHDR')
-        if i < 0:
-            return None
-        return struct.unpack('>II', blob[i+4:i+12])
+    i = blob.find(b'IHDR')
+    if i < 0 or len(blob) < i + 12:
+        return None
+    w, h = struct.unpack('>II', blob[i+4:i+12])
+    # a menu icon is small; ignore anything else (textures, bogus matches)
+    if 16 <= w <= 700 and 16 <= h <= 700 and 300 <= len(blob) <= 400000:
+        return w, h
+    return None
 
 def make_png(target, w, h):
     """PNG of exactly `target` bytes (so the surrounding data keeps its length)."""
@@ -92,76 +93,94 @@ def raw_pngs(data):
             break
         e += len(PNG_END)
         wh = png_size(data[s:e])
-        if wh and (e - s) > 300:
+        if wh:
             out.append((s, e, wh[0], wh[1]))
         i = e
     return out
 
-titles = icons = machos = 0
+# main executable is handled last (the menu normally lives in a dylib)
+try:
+    with open(os.path.join(app, 'Info.plist'), 'rb') as f:
+        main_exe = plistlib.load(f).get('CFBundleExecutable', '')
+except Exception:
+    main_exe = ''
+
+files = []
 for root, _, names in os.walk(app):
     for n in names:
         p = os.path.join(root, n)
         if os.path.islink(p) or not os.path.isfile(p):
             continue
         with open(p, 'rb') as f:
-            data = f.read()
-        if data[:4] not in MACHO:
+            if f.read(4) in MACHO:
+                files.append(p)
+files.sort(key=lambda p: (os.path.relpath(p, app) == main_exe, p))
+
+titles = icons = 0
+for p in files:
+    rel = os.path.relpath(p, app)
+    is_main = (rel == main_exe)
+    with open(p, 'rb') as f:
+        data = f.read()
+    new = bytearray(data)
+    info = []
+
+    # --- title (ascii and utf-16) ---
+    for old, enc in ((OLD, 'ascii'), (OLD16, 'utf-16-le')):
+        if old in new:
+            info.append(f"title[{enc}] x{new.count(old)}")
+            if title:
+                t = title.encode('utf-8' if enc == 'ascii' else enc)
+                sp = b' ' if enc == 'ascii' else b' \x00'
+                if len(t) > len(old):
+                    sys.exit("MENU_TITLE too long (max 20 characters)")
+                new = bytearray(bytes(new).replace(old, t + sp * ((len(old) - len(t)) // len(sp))))
+                titles += 1
+
+    # find icon candidates first (printed even if patching fails)
+    b64s = []
+    for m in set(B64.findall(bytes(new))):
+        try:
+            orig = base64.b64decode(m, validate=True)
+        except Exception:
             continue
-        machos += 1
-        rel = os.path.relpath(p, app)
-        new = bytearray(data)
-        info = []
+        wh = png_size(orig)
+        if wh:
+            b64s.append((m, orig, wh))
+    b64s.sort(key=lambda x: len(x[0]), reverse=True)
+    raws = raw_pngs(bytes(new))
+    if b64s:
+        info.append("base64-png " + ",".join(f"{w}x{h}" for _, _, (w, h) in b64s[:6]))
+    if raws:
+        info.append("raw-png " + ",".join(f"{w}x{h}({e-s}B)" for s, e, w, h in raws[:6]))
+    if info:
+        print(f"  [{rel}] " + "; ".join(info), flush=True)
 
-        # --- title (ascii and utf-16) ---
-        for old, enc in ((OLD, 'ascii'), (OLD16, 'utf-16-le')):
-            if old in new:
-                info.append(f"title[{enc}] x{new.count(old)}")
-                if title:
-                    t = title.encode(enc if enc != 'ascii' else 'utf-8')
-                    sp = b' ' if enc == 'ascii' else b' \x00'
-                    if len(t) > len(old):
-                        sys.exit("MENU_TITLE too long (max 20 characters)")
-                    new = bytearray(bytes(new).replace(old, t + sp * ((len(old) - len(t)) // len(sp))))
-                    titles += 1
-
-        # --- icon: base64 PNG text ---
-        b64s = sorted(set(B64.findall(bytes(new))), key=len, reverse=True)
-        if b64s:
-            info.append(f"base64-png x{len(b64s)}")
-        for m in b64s[:1]:
-            try:
-                orig = base64.b64decode(m, validate=True)
-                w, h = png_size(orig)
+    # --- icon (the main executable only if no dylib had one) ---
+    if not (is_main and icons > 0):
+        try:
+            if b64s:
+                m, orig, (w, h) = b64s[0]
                 png = make_png(len(orig), w, h)
-                if png is None:
-                    print("  menu icon: new icon does not fit (base64) in", rel)
-                else:
+                if png is not None:
                     nb = base64.b64encode(png)
                     if len(nb) == len(m):
                         new = bytearray(bytes(new).replace(m, nb))
                         icons += 1
-            except Exception:
-                pass
+            elif raws:
+                s0, e0, w, h = max(raws, key=lambda r: r[1] - r[0])
+                png = make_png(e0 - s0, w, h)
+                if png is not None:
+                    new[s0:e0] = png
+                    icons += 1
+        except Exception as ex:
+            print("  menu icon patch skipped in", rel, "->", repr(ex))
 
-        # --- icon: raw PNG bytes ---
-        raws = raw_pngs(bytes(new))
-        if raws:
-            info.append("raw-png " + ",".join(f"{w}x{h}({e-s}B)" for s, e, w, h in raws[:6]))
-            s0, e0, w, h = max(raws, key=lambda r: r[1] - r[0])
-            png = make_png(e0 - s0, w, h)
-            if png is None:
-                print("  menu icon: new icon does not fit (raw) in", rel)
-            else:
-                new[s0:e0] = png
-                icons += 1
+    if bytes(new) != data:
+        with open(p, 'wb') as f:
+            f.write(bytes(new))
 
-        if info:
-            print(f"  [{rel}] " + "; ".join(info))
-        if bytes(new) != data:
-            with open(p, 'wb') as f:
-                f.write(bytes(new))
-
-print(f"  Mach-O files scanned: {machos}")
+print(f"  Mach-O files scanned: {len(files)}")
 print(f"  menu title patched: {titles} place(s), menu icon patched: {icons} place(s)")
 if titles == 0 or icons == 0:
     print("  !! not everything was found. Files containing 'iosgods' (any case):")
