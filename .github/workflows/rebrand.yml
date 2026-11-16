@@ -9,8 +9,8 @@ on:
         default: "My App"
       menu_title:
         description: "Mod menu title (max 20 characters)"
-        required: false
-        default: ""
+        required: true
+        default: "My Mod Menu"
       from_tag:
         description: "Release to download IPAs from"
         required: true
@@ -31,7 +31,12 @@ jobs:
   rebrand:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python & Pillow
+        run: pip3 install --quiet pillow
+
       - name: Run script
         env:
           GH_TOKEN: ${{ github.token }}
@@ -43,7 +48,10 @@ jobs:
           MENU_ICON: menu_icon.png
           MENU_TITLE: ${{ inputs.menu_title }}
           RED_HEXES: ${{ inputs.red_hexes }}
-        run: bash ipa-rebrand.sh
+        run: |
+          chmod +x ipa-rebrand.sh
+          ./ipa-rebrand.sh
+
       - name: Upload debug files
         if: always()
         uses: actions/upload-artifact@v4
