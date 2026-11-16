@@ -45,14 +45,26 @@ from PIL import Image
 
 app, title, icon_path = sys.argv[1:4]
 OLD = b"Made for iOSGods.com"
+OLD16 = OLD.decode().encode('utf-16-le')
 MACHO = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca')
 B64 = re.compile(rb'iVBORw0KGgo[A-Za-z0-9+/]{200,}={0,2}')
+PNG_SIG = b'\x89PNG\r\n\x1a\n'
+PNG_END = b'IEND\xaeB`\x82'
 
 def chunk(t, d):
     return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
 
+def png_size(blob):
+    try:
+        return Image.open(io.BytesIO(blob)).size
+    except Exception:
+        i = blob.find(b'IHDR')
+        if i < 0:
+            return None
+        return struct.unpack('>II', blob[i+4:i+12])
+
 def make_png(target, w, h):
-    """PNG of exactly `target` bytes (so the base64 text keeps its length)."""
+    """PNG of exactly `target` bytes (so the surrounding data keeps its length)."""
     src = Image.open(icon_path).convert('RGBA')
     s = 1.0
     while True:
@@ -69,7 +81,23 @@ def make_png(target, w, h):
             return None
         s *= 0.85
 
-titles = icons = 0
+def raw_pngs(data):
+    out, i = [], 0
+    while True:
+        s = data.find(PNG_SIG, i)
+        if s < 0:
+            break
+        e = data.find(PNG_END, s)
+        if e < 0:
+            break
+        e += len(PNG_END)
+        wh = png_size(data[s:e])
+        if wh and (e - s) > 300:
+            out.append((s, e, wh[0], wh[1]))
+        i = e
+    return out
+
+titles = icons = machos = 0
 for root, _, names in os.walk(app):
     for n in names:
         p = os.path.join(root, n)
@@ -79,33 +107,77 @@ for root, _, names in os.walk(app):
             data = f.read()
         if data[:4] not in MACHO:
             continue
-        new = data
-        if title and OLD in new:
-            t = title.encode('utf-8')
-            if len(t) > len(OLD):
-                sys.exit("MENU_TITLE too long (max 20 bytes)")
-            new = new.replace(OLD, t + b' ' * (len(OLD) - len(t)))
-            titles += 1
-        # replace only the biggest embedded base64 PNG (the floating menu icon)
-        for m in sorted(set(B64.findall(new)), key=len, reverse=True)[:1]:
+        machos += 1
+        rel = os.path.relpath(p, app)
+        new = bytearray(data)
+        info = []
+
+        # --- title (ascii and utf-16) ---
+        for old, enc in ((OLD, 'ascii'), (OLD16, 'utf-16-le')):
+            if old in new:
+                info.append(f"title[{enc}] x{new.count(old)}")
+                if title:
+                    t = title.encode(enc if enc != 'ascii' else 'utf-8')
+                    sp = b' ' if enc == 'ascii' else b' \x00'
+                    if len(t) > len(old):
+                        sys.exit("MENU_TITLE too long (max 20 characters)")
+                    new = bytearray(bytes(new).replace(old, t + sp * ((len(old) - len(t)) // len(sp))))
+                    titles += 1
+
+        # --- icon: base64 PNG text ---
+        b64s = sorted(set(B64.findall(bytes(new))), key=len, reverse=True)
+        if b64s:
+            info.append(f"base64-png x{len(b64s)}")
+        for m in b64s[:1]:
             try:
                 orig = base64.b64decode(m, validate=True)
-                w, h = Image.open(io.BytesIO(orig)).size
+                w, h = png_size(orig)
+                png = make_png(len(orig), w, h)
+                if png is None:
+                    print("  menu icon: new icon does not fit (base64) in", rel)
+                else:
+                    nb = base64.b64encode(png)
+                    if len(nb) == len(m):
+                        new = bytearray(bytes(new).replace(m, nb))
+                        icons += 1
             except Exception:
-                continue
-            png = make_png(len(orig), w, h)
-            if png is None:
-                print("  menu icon: new icon does not fit in", n)
-                continue
-            nb = base64.b64encode(png)
-            if len(nb) == len(m):
-                new = new.replace(m, nb)
-                icons += 1
-        if new != data:
-            with open(p, 'wb') as f:
-                f.write(new)
+                pass
 
-print(f"  menu title patched in {titles} file(s), menu icon patched in {icons} file(s)")
+        # --- icon: raw PNG bytes ---
+        raws = raw_pngs(bytes(new))
+        if raws:
+            info.append("raw-png " + ",".join(f"{w}x{h}({e-s}B)" for s, e, w, h in raws[:6]))
+            s0, e0, w, h = max(raws, key=lambda r: r[1] - r[0])
+            png = make_png(e0 - s0, w, h)
+            if png is None:
+                print("  menu icon: new icon does not fit (raw) in", rel)
+            else:
+                new[s0:e0] = png
+                icons += 1
+
+        if info:
+            print(f"  [{rel}] " + "; ".join(info))
+        if bytes(new) != data:
+            with open(p, 'wb') as f:
+                f.write(bytes(new))
+
+print(f"  Mach-O files scanned: {machos}")
+print(f"  menu title patched: {titles} place(s), menu icon patched: {icons} place(s)")
+if titles == 0 or icons == 0:
+    print("  !! not everything was found. Files containing 'iosgods' (any case):")
+    hits = 0
+    for root, _, names in os.walk(app):
+        for n in names:
+            p = os.path.join(root, n)
+            if os.path.islink(p) or not os.path.isfile(p) or os.path.getsize(p) > 200_000_000:
+                continue
+            with open(p, 'rb') as f:
+                d = f.read().lower()
+            if b'iosgods' in d or 'iosgods'.encode('utf-16-le') in d:
+                print("     ", os.path.relpath(p, app)); hits += 1
+    if hits == 0:
+        print("      none -> the text is hidden/encrypted inside the code (needs the source or the dylib)")
+
 PY
 
 echo "== Downloading IPAs from $FROM_TAG"
