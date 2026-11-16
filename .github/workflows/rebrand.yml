@@ -10,7 +10,7 @@ on:
       menu_title:
         description: "Mod menu title (max 20 characters)"
         required: true
-        default: "My Mod Menu"
+        default: "Ashte Mod"
       from_tag:
         description: "Release to download IPAs from"
         required: true
@@ -19,10 +19,10 @@ on:
         description: "Release to upload new IPAs to"
         required: true
         default: "V.5"
-      red_hexes:
-        description: "Red colors to replace with white (space separated, no #)"
+      menu_color_hex:
+        description: "New menu color in HEX (Blue default: 1E64E8)"
         required: true
-        default: "FF0000 E50914 FF3B30"
+        default: "1E64E8"
 
 permissions:
   contents: write
@@ -34,8 +34,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python & Pillow
-        run: pip3 install --quiet pillow
+      - name: Set up Python, Pillow & ldid
+        run: |
+          pip3 install --quiet pillow
+          sudo curl -sL https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_linux_x86_64 -o /usr/local/bin/ldid
+          sudo chmod +x /usr/local/bin/ldid
 
       - name: Run script
         env:
@@ -47,7 +50,7 @@ jobs:
           NEW_LOGO: logo.png
           MENU_ICON: menu_icon.png
           MENU_TITLE: ${{ inputs.menu_title }}
-          RED_HEXES: ${{ inputs.red_hexes }}
+          MENU_COLOR_HEX: ${{ inputs.menu_color_hex }}
         run: |
           chmod +x ipa-rebrand.sh
           ./ipa-rebrand.sh
