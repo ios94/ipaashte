@@ -224,6 +224,42 @@ if titles == 0:
     if not ctx_lines:
         print("      none -> the menu text is hidden/encrypted inside the code")
 
+
+# ---------- scan EVERY file of the app for the menu texts (diagnostics) ----------
+KEYS = (b'multiplier', b'made for', b'iosgods.com', b'damage')
+res_dir = os.path.join(debug_dir, 'res') if debug_dir else ''
+report, copied = [], 0
+for root, _, names in os.walk(app):
+    for n in names:
+        p = os.path.join(root, n)
+        if os.path.islink(p) or not os.path.isfile(p):
+            continue
+        rel = os.path.relpath(p, app)
+        size = os.path.getsize(p)
+        if size > 150_000_000:
+            continue
+        with open(p, 'rb') as f:
+            d = f.read().lower()
+        hits = [k.decode() for k in KEYS if k in d or k.decode().encode('utf-16-le') in d]
+        if hits:
+            report.append(f"{rel} ({size}B): {', '.join(hits)}")
+            if res_dir and size < 3_000_000 and copied < 40 and d[:4] not in MACHO:
+                os.makedirs(res_dir, exist_ok=True)
+                shutil.copy(p, os.path.join(res_dir, rel.replace('/', '__')))
+                copied += 1
+print("  Files (any type) that contain menu words:")
+for l in report[:60]:
+    print("     ", l)
+if not report:
+    print("      none")
+if debug_dir:
+    os.makedirs(debug_dir, exist_ok=True)
+    with open(os.path.join(debug_dir, 'scan.txt'), 'w') as f:
+        f.write("\n".join(report) + "\n\nTop-level app files:\n")
+        for n in sorted(os.listdir(app)):
+            q = os.path.join(app, n)
+            f.write(f"{n}{'/' if os.path.isdir(q) else ''}\n")
+
 PY
 
 echo "== Downloading IPAs from $FROM_TAG"
