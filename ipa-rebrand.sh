@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # ipa-rebrand.sh
 # Downloads every .ipa from release FROM_TAG, rebrands it, uploads to release TO_TAG.
-#  - app name + app icon
-#  - mod-menu title ("Made for iOSGods.com") + floating menu icon (binary patch)
-#  - red -> white in text resource files
 
 set -euo pipefail
 
@@ -13,7 +10,7 @@ FROM_TAG="${FROM_TAG:-V.1}"
 TO_TAG="${TO_TAG:-V.5}"
 NEW_NAME="${NEW_NAME:-My App}"            # new app name
 NEW_LOGO="${NEW_LOGO:-logo.png}"          # app icon (opaque PNG, 1024x1024)
-MENU_TITLE="${MENU_TITLE:-}"              # replaces "Made for iOSGods.com" (max 20 chars)
+MENU_TITLE="${MENU_TITLE:-My Mod Menu}"   # replaces "Made for iOSGods.com" (max 20 chars)
 MENU_ICON="${MENU_ICON:-menu_icon.png}"   # floating menu icon (transparent PNG)
 read -r -a RED_HEXES <<< "${RED_HEXES:-FF0000 E50914 FF3B30}"   # reds to replace (no #)
 WHITE_HEX="FFFFFF"
@@ -26,7 +23,7 @@ python3 -c "import PIL" 2>/dev/null || pip3 install --quiet pillow
 [ -f "$NEW_LOGO" ] || { echo "Logo not found: $NEW_LOGO"; exit 1; }
 [ -f "$MENU_ICON" ] || MENU_ICON="$NEW_LOGO"
 
-resize() { # src w h dst  (Pillow, works on any system)
+resize() { # src w h dst (Pillow)
   python3 - "$1" "$2" "$3" "$4" <<'PYR'
 import sys
 from PIL import Image
@@ -45,10 +42,10 @@ from PIL import Image
 
 app, title, icon_path = sys.argv[1:4]
 debug_dir = sys.argv[4] if len(sys.argv) > 4 else ''
-OLD = b"Made for iOSGods.com"
-OLD16 = OLD.decode().encode('utf-16-le')
-SEG = b"iOSGods.com"
-SEG0 = b"Made for "
+
+if not title.strip():
+    title = "My Mod Menu"
+
 MACHO = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca')
 B64 = re.compile(rb'iVBORw0KGgo[A-Za-z0-9+/]{200,}={0,2}')
 PNG_SIG = b'\x89PNG\r\n\x1a\n'
@@ -63,13 +60,11 @@ def png_size(blob):
     if i < 0 or len(blob) < i + 12:
         return None
     w, h = struct.unpack('>II', blob[i+4:i+12])
-    # a menu icon is small; ignore anything else (textures, bogus matches)
     if 16 <= w <= 700 and 16 <= h <= 700 and 300 <= len(blob) <= 400000:
         return w, h
     return None
 
 def looks_like_icon(blob):
-    """The mascot is a colourful, mostly filled picture; the heart etc. are thin white line art."""
     try:
         im = Image.open(io.BytesIO(blob)).convert('RGBA')
     except Exception:
@@ -80,7 +75,6 @@ def looks_like_icon(blob):
     return opaque >= 0.25 * total and len(colors) >= 30
 
 def make_png(target, w, h):
-    """PNG of exactly `target` bytes (so the surrounding data keeps its length)."""
     src = Image.open(icon_path).convert('RGBA')
     s = 1.0
     while True:
@@ -114,7 +108,25 @@ def raw_pngs(data):
         i = e
     return out
 
-# main executable is handled last (the menu normally lives in a dylib)
+def patch_cstr(buf, target_bytes, new_str):
+    """Replaces C-strings in-place up to the null byte without breaking binary offsets."""
+    count = 0
+    idx = 0
+    tb = new_str.encode('utf-8')
+    while True:
+        pos = buf.find(target_bytes, idx)
+        if pos < 0:
+            break
+        end = buf.find(b'\x00', pos)
+        if end < 0 or end - pos > 60:
+            end = pos + len(target_bytes)
+        avail = end - pos
+        rep = tb[:avail].ljust(avail, b' ')
+        buf[pos:end] = rep
+        count += 1
+        idx = end
+    return count
+
 try:
     with open(os.path.join(app, 'Info.plist'), 'rb') as f:
         main_exe = plistlib.load(f).get('CFBundleExecutable', '')
@@ -140,7 +152,6 @@ for p in files:
     with open(p, 'rb') as f:
         data = f.read()
 
-    # keep an untouched copy of the interesting files for debugging
     low = data.lower()
     if debug_dir and not is_main and len(data) < 60_000_000 and (
             p.endswith('.dylib') or b'gods' in low or b'multiplier' in low):
@@ -150,29 +161,48 @@ for p in files:
         ctx_lines.append(f"     {rel}: {m.group().decode('ascii', 'replace')}")
 
     new = bytearray(data)
-    info = []
+    t_hits = 0
 
-    # --- title (ascii and utf-16, whole string) ---
-    found_whole = False
-    for old, enc in ((OLD, 'ascii'), (OLD16, 'utf-16-le')):
-        if old in new:
-            found_whole = True
-            info.append(f"title[{enc}] x{new.count(old)}")
-            if title:
-                t = title.encode('utf-8' if enc == 'ascii' else enc)
-                sp = b' ' if enc == 'ascii' else b' \x00'
-                if len(t) > len(old):
-                    sys.exit("MENU_TITLE too long (max 20 characters)")
-                new = bytearray(bytes(new).replace(old, t + sp * ((len(old) - len(t)) // len(sp))))
-                titles += 1
-    # --- title stored in two pieces ("Made for " + "iOSGods.com") ---
-    if not found_whole and title and SEG in new:
-        info.append("title-pieces")
-        new = bytearray(bytes(new).replace(SEG, title.encode()[:len(SEG)].ljust(len(SEG))))
-        new = bytearray(bytes(new).replace(SEG0, b' ' * len(SEG0)))
-        titles += 1
+    # 1) Patch all standard & format-string variations of "Made for iOSGods.com"
+    for pat in (
+        b"Made for iOSGods.com",
+        b"Made for iosgods.com",
+        b"Made for %@!",
+        b"Made for %@",
+    ):
+        t_hits += patch_cstr(new, pat, title)
 
-    # --- icon candidates (all small, colourful PNGs: menu header + floating button) ---
+    # 2) Handle split strings ("Made for " + "iOSGods.com")
+    if t_hits == 0 and (b"iOSGods.com" in new or b"iosgods.com" in new):
+        tb = title.encode('utf-8')
+        if b"Made for " in new and len(tb) > 11:
+            p1 = tb[:9].ljust(9, b' ')
+            p2 = tb[9:20].ljust(11, b' ')
+            new = bytearray(bytes(new).replace(b"Made for ", p1).replace(b"iOSGods.com", p2).replace(b"iosgods.com", p2))
+            t_hits += 1
+        else:
+            new = bytearray(bytes(new).replace(b"Made for ", b" " * 9))
+            t_hits += patch_cstr(new, b"iOSGods.com", title)
+            t_hits += patch_cstr(new, b"iosgods.com", title)
+
+    # 3) Handle UTF-16LE encoded strings
+    old16 = "Made for iOSGods.com".encode('utf-16-le')
+    if old16 in new:
+        rep16 = title[:20].ljust(20).encode('utf-16-le')
+        new = bytearray(bytes(new).replace(old16, rep16))
+        t_hits += 1
+
+    # 4) Handle Base64 encoded "Made for iOSGods.com" (TWFkZSBmb3IgaU9TR29kcy5jb20=)
+    b64_old = base64.b64encode(b"Made for iOSGods.com")
+    if b64_old in new:
+        b64_new = base64.b64encode(title[:20].ljust(20).encode('utf-8'))
+        if len(b64_new) == len(b64_old):
+            new = bytearray(bytes(new).replace(b64_old, b64_new))
+            t_hits += 1
+
+    titles += t_hits
+
+    # --- Find & Patch Icons ---
     b64s = []
     for m in set(B64.findall(bytes(new))):
         try:
@@ -183,16 +213,9 @@ for p in files:
         if wh and looks_like_icon(orig):
             b64s.append((m, orig, wh))
     raws = [r for r in raw_pngs(bytes(new)) if looks_like_icon(bytes(new[r[0]:r[1]]))]
-    if b64s:
-        info.append("base64-png " + ",".join(f"{w}x{h}" for _, _, (w, h) in b64s[:6]))
-    if raws:
-        info.append("raw-png " + ",".join(f"{w}x{h}({e-s}B)" for s, e, w, h in raws[:6]))
-    if info:
-        print(f"  [{rel}] " + "; ".join(info), flush=True)
 
-    # --- patch icons (the main executable only if no dylib had any) ---
-    # only the menu library (it contains the slider code) - never other frameworks like iGameGod
-    if b'modslider' in data and not (is_main and icons > 0):
+    is_menu_bin = (b'modslider' in low or b'iosgods' in low or b'multiplier' in low or t_hits > 0) and b'igamegod' not in low
+    if is_menu_bin and not (is_main and icons > 0):
         for m, orig, (w, h) in b64s:
             try:
                 png = make_png(len(orig), w, h)
@@ -215,6 +238,7 @@ for p in files:
     if bytes(new) != data:
         with open(p, 'wb') as f:
             f.write(bytes(new))
+        print(f"  [Patched {rel}] title hits: {t_hits}, icons patched: {icons}", flush=True)
 
 print(f"  Mach-O files scanned: {len(files)}")
 print(f"  menu title patched: {titles} place(s), menu icon patched: {icons} place(s)")
@@ -222,45 +246,6 @@ if titles == 0:
     print("  !! title not found. Text pieces seen in the code (gods / made for / multiplier):")
     for l in ctx_lines[:40]:
         print(l)
-    if not ctx_lines:
-        print("      none -> the menu text is hidden/encrypted inside the code")
-
-
-# ---------- scan EVERY file of the app for the menu texts (diagnostics) ----------
-KEYS = (b'multiplier', b'made for', b'iosgods.com', b'damage')
-res_dir = os.path.join(debug_dir, 'res') if debug_dir else ''
-report, copied = [], 0
-for root, _, names in os.walk(app):
-    for n in names:
-        p = os.path.join(root, n)
-        if os.path.islink(p) or not os.path.isfile(p):
-            continue
-        rel = os.path.relpath(p, app)
-        size = os.path.getsize(p)
-        if size > 150_000_000:
-            continue
-        with open(p, 'rb') as f:
-            d = f.read().lower()
-        hits = [k.decode() for k in KEYS if k in d or k.decode().encode('utf-16-le') in d]
-        if hits:
-            report.append(f"{rel} ({size}B): {', '.join(hits)}")
-            if res_dir and size < 3_000_000 and copied < 40 and d[:4] not in MACHO:
-                os.makedirs(res_dir, exist_ok=True)
-                shutil.copy(p, os.path.join(res_dir, rel.replace('/', '__')))
-                copied += 1
-print("  Files (any type) that contain menu words:")
-for l in report[:60]:
-    print("     ", l)
-if not report:
-    print("      none")
-if debug_dir:
-    os.makedirs(debug_dir, exist_ok=True)
-    with open(os.path.join(debug_dir, 'scan.txt'), 'w') as f:
-        f.write("\n".join(report) + "\n\nTop-level app files:\n")
-        for n in sorted(os.listdir(app)):
-            q = os.path.join(app, n)
-            f.write(f"{n}{'/' if os.path.isdir(q) else ''}\n")
-
 PY
 
 echo "== Downloading IPAs from $FROM_TAG"
@@ -273,7 +258,11 @@ for ipa in "$WORK"/in/*.ipa; do
   unzip -q "$ipa" -d "$T"
   APP="$(ls -d "$T"/Payload/*.app | head -n1)"
 
-  # 1) App name
+  # 1) App name + Force custom icon in Info.plist
+  resize "$NEW_LOGO" 120 120 "$APP/AppIcon60x60@2x.png"
+  resize "$NEW_LOGO" 180 180 "$APP/AppIcon60x60@3x.png"
+  resize "$NEW_LOGO" 152 152 "$APP/AppIcon76x76@2x~ipad.png"
+
   python3 - "$APP/Info.plist" "$NEW_NAME" <<'PY'
 import plistlib, sys
 path, name = sys.argv[1:3]
@@ -281,17 +270,28 @@ with open(path, 'rb') as f:
     d = plistlib.load(f)
 d['CFBundleDisplayName'] = name
 d['CFBundleName'] = name
+icon_dict = {
+    'CFBundlePrimaryIcon': {
+        'CFBundleIconFiles': ['AppIcon60x60', 'AppIcon76x76'],
+        'UIPrerenderedIcon': True
+    }
+}
+d['CFBundleIcons'] = icon_dict
+d['CFBundleIcons~ipad'] = icon_dict
 with open(path, 'wb') as f:
     plistlib.dump(d, f, fmt=plistlib.FMT_BINARY)
 PY
 
-  # 2) App icon (keeps each icon's original size)
+  # 2) App icon (replace all existing icon PNGs at their exact dimensions)
   while IFS= read -r -d '' f; do
     read -r w h < <(python3 -c "
 import struct, sys
 b = open(sys.argv[1], 'rb').read(64)
 i = b.find(b'IHDR')
-print(*struct.unpack('>II', b[i+4:i+12]))
+if i >= 0:
+    print(*struct.unpack('>II', b[i+4:i+12]))
+else:
+    print(180, 180)
 " "$f")
     resize "$NEW_LOGO" "$w" "$h" "$f.new" && mv "$f.new" "$f"
   done < <(find "$APP" -maxdepth 1 -type f \( -iname "AppIcon*.png" -o -iname "Icon*.png" \) -print0)
@@ -299,12 +299,56 @@ print(*struct.unpack('>II', b[i+4:i+12]))
   # 3) Mod menu: title + floating icon (inside the dylib / binary)
   python3 "$WORK/patch_menu.py" "$APP" "$MENU_TITLE" "$MENU_ICON" "$WORK/debug"
 
-  # 4) Red -> white (text resource files only)
+  # 4) Red -> white (text resource files + binary/XML plists)
   for c in "${RED_HEXES[@]}"; do
     find "$APP" -type f \( -name "*.json" -o -name "*.css" -o -name "*.js" \
-      -o -name "*.html" -o -name "*.plist" -o -name "*.strings" \) \
+      -o -name "*.html" -o -name "*.strings" \) \
       -exec perl -pi -e "s/#$c/#$WHITE_HEX/gi" {} +
   done
+
+  python3 - "$APP" "$WHITE_HEX" "${RED_HEXES[@]}" <<'PY'
+import os, sys, re, plistlib
+
+app, white, reds = sys.argv[1], sys.argv[2], sys.argv[3:]
+pattern = re.compile(r'#(' + '|'.join(re.escape(r) for r in reds) + r')\b', re.I)
+
+def replace_in_obj(obj):
+    changed = False
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            nv, c = replace_in_obj(v)
+            if c:
+                obj[k] = nv
+                changed = True
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            nv, c = replace_in_obj(v)
+            if c:
+                obj[i] = nv
+                changed = True
+    elif isinstance(obj, str):
+        new_s, n = pattern.subn('#' + white, obj)
+        if n > 0:
+            return new_s, True
+    return obj, changed
+
+for root, _, names in os.walk(app):
+    for n in names:
+        if not n.endswith('.plist') or n == 'Info.plist':
+            continue
+        p = os.path.join(root, n)
+        try:
+            with open(p, 'rb') as f:
+                raw = f.read()
+            is_bin = raw.startswith(b'bplist')
+            data = plistlib.loads(raw)
+            data, changed = replace_in_obj(data)
+            if changed:
+                with open(p, 'wb') as f:
+                    plistlib.dump(data, f, fmt=plistlib.FMT_BINARY if is_bin else plistlib.FMT_XML)
+        except Exception:
+            pass
+PY
 
   # 5) Re-pack
   (cd "$T" && zip -qry "$WORK/out/$fname" Payload)
