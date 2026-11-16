@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ipa-rebrand.sh (100% Crash-Free Safe Edition)
+# ipa-rebrand.sh (Targeted iGameGod & Mod Menu Patcher)
 
 set -euo pipefail
 
@@ -33,7 +33,7 @@ PYR
 WORK="$(pwd)/work"
 rm -rf "$WORK"; mkdir -p "$WORK/in" "$WORK/out"
 
-# ---- Crash-Free Binary Patcher (ONLY touches verified strings & exact-size PNGs) ----
+# ---- Binary Patcher targeting iGameGod and Mod Menu dylibs ----
 cat > "$WORK/patch_menu.py" <<'PY'
 import sys, os, re, io, base64, struct, zlib, plistlib, shutil
 from PIL import Image
@@ -48,17 +48,18 @@ hex_col = hex_col.lstrip('#').strip().upper()
 if len(hex_col) != 6:
     hex_col = "1E64E8"
 
-# Calculate a slightly darker 6-char hex for header bars
+# Calculate darker hex for header bars
 r = max(0, int(int(hex_col[0:2], 16) * 0.78))
 g = max(0, int(int(hex_col[2:4], 16) * 0.78))
 b = max(0, int(int(hex_col[4:6], 16) * 0.78))
 hdr_hex = f"{r:02X}{g:02X}{b:02X}"
 
 MACHO = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca')
-B64 = re.compile(rb'iVBORw0KGgo[A-Za-z0-9+/]{120,}={0,2}')
+B64 = re.compile(rb'iVBORw0KGgo[A-Za-z0-9+/]{100,}={0,2}')
 PNG_SIG = b'\x89PNG\r\n\x1a\n'
 PNG_END = b'IEND\xaeB`\x82'
 
+# Only ignore standard ad/analytics SDKs (DO NOT ignore iGameGod)
 IGNORE_SDKS = (
     'adjustsdk', 'applovin', 'bidmachine', 'fbsdk', 'helpshift',
     'hyprmx', 'ironsource', 'unityads', 'vungle', 'chartboost',
@@ -73,7 +74,7 @@ def png_size(blob):
     if i < 0 or len(blob) < i + 12:
         return None
     w, h = struct.unpack('>II', blob[i+4:i+12])
-    if 16 <= w <= 700 and 16 <= h <= 700 and 300 <= len(blob) <= 400000:
+    if 16 <= w <= 700 and 16 <= h <= 700 and 200 <= len(blob) <= 500000:
         return w, h
     return None
 
@@ -85,7 +86,7 @@ def looks_like_icon(blob):
     total = im.width * im.height
     opaque = sum(im.getchannel('A').histogram()[129:])
     colors = im.convert('RGB').getcolors(maxcolors=1 << 24) or []
-    return opaque >= 0.25 * total and len(colors) >= 30
+    return opaque >= 0.20 * total and len(colors) >= 20
 
 def make_png(target, w, h):
     src = Image.open(icon_path).convert('RGBA')
@@ -122,7 +123,6 @@ def raw_pngs(data):
     return out
 
 def safe_patch_title(buf, new_title):
-    """Strictly replaces exact-length ASCII/UTF-8 string literals without touching null terminators or %@."""
     hits = 0
     tb = new_title.encode('utf-8')
 
@@ -140,8 +140,7 @@ def safe_patch_title(buf, new_title):
         hits += buf.count(old16)
         buf[:] = bytes(buf).replace(old16, rep16)
 
-    # 3) If "Made for iOSGods.com" is split into "Made for " (9B) and "iOSGods.com" (11B)
-    # Only replace when followed by null byte (\x00) so we NEVER corrupt URLs like "https://iosgods.com/..."
+    # 3) Split string replacement
     if hits == 0:
         if b"iOSGods.com\x00" in buf or b"iosgods.com\x00" in buf:
             if b"Made for \x00" in buf and len(tb) > 11:
@@ -154,19 +153,10 @@ def safe_patch_title(buf, new_title):
                 buf[:] = bytes(buf).replace(b"Made for \x00", (b' ' * 9) + b'\x00')
                 buf[:] = bytes(buf).replace(b"iOSGods.com\x00", p2).replace(b"iosgods.com\x00", p2)
             hits += 1
-        elif b"Made for %@" in buf:
-            # Keep "%@" intact if needed, or replace "Made for " (9 chars) with spaces and put title in "iOSGods.com"
-            if b"iOSGods.com" in buf:
-                p1 = tb[:9].ljust(9, b' ')
-                p2 = tb[9:20].ljust(11, b' ')
-                buf[:] = bytes(buf).replace(b"Made for %@", p1 + b"%@")
-                buf[:] = bytes(buf).replace(b"iOSGods.com", p2)
-                hits += 1
 
     return hits
 
 def safe_patch_hex_colors(buf, body_hex_str, hdr_hex_str):
-    """Safely replaces ONLY 6-byte ASCII hex color strings (never touches binary float/ARM64 instructions!)."""
     c_hits = 0
     b_new = body_hex_str.encode('ascii')
     h_new = hdr_hex_str.encode('ascii')
@@ -211,45 +201,32 @@ for p in files:
     rel_low = rel.lower()
     is_main = (rel == main_exe)
 
-    # Never touch Ad/Analytics SDKs or iGameGod's own cheat engine framework!
-    if any(sdk in rel_low for sdk in IGNORE_SDKS) or 'igamegod' in rel_low:
+    if any(sdk in rel_low for sdk in IGNORE_SDKS):
         continue
 
     with open(p, 'rb') as f:
         data = f.read()
 
     low = data.lower()
-    has_menu = (
-        p.endswith('.dylib') or b'modslider' in low
-        or b'made for iosgods' in low or b'damage multiplier' in low
-    )
-    if not has_menu and not is_main:
-        continue
+    # Target iGameGod framework or any binary containing menu markers
+    is_menu_file = 'igamegod' in rel_low or p.endswith('.dylib') or b'iosgods' in low or b'modslider' in low
 
-    # Save untouched dylibs & scan main executable strings for debugging
-    if debug_dir:
-        os.makedirs(debug_dir, exist_ok=True)
-        if not is_main and len(data) < 60_000_000:
-            shutil.copy(p, os.path.join(debug_dir, rel.replace('/', '__')))
-        # Extract any strings near "Multiplier" or "Made for" so we can see exact bytes
-        matches = re.findall(rb'[\x20-\x7e]{4,60}(?:Multiplier|Made for|iOSGods|E72E2A|BD2522)[\x20-\x7e]{0,40}', data, re.I)
-        if matches:
-            with open(os.path.join(debug_dir, 'menu_strings_found.txt'), 'a') as sf:
-                sf.write(f"=== {rel} ===\n")
-                for m in matches[:50]:
-                    sf.write("  " + m.decode('ascii', 'replace') + "\n")
+    if not is_menu_file and not is_main:
+        continue
 
     new = bytearray(data)
 
-    # 1) Safe Title Patch
+    # 1) Patch Title
     t_hits = safe_patch_title(new, title)
     titles += t_hits
 
-    # 2) Safe Hex Color Patch
-    c_hits = safe_patch_hex_colors(new, hex_col, hdr_hex)
-    colors += c_hits
+    # 2) Patch Red Colors -> Blue inside iGameGod / menu binaries
+    c_hits = 0
+    if 'igamegod' in rel_low or b'iosgods' in low or t_hits > 0:
+        c_hits = safe_patch_hex_colors(new, hex_col, hdr_hex)
+        colors += c_hits
 
-    # 3) Safe Icon Patch (only inside the mod menu dylib, or main_exe if no dylib had icons)
+    # 3) Patch Icons inside iGameGod / menu binary
     b64s = []
     for m in set(B64.findall(bytes(new))):
         try:
@@ -262,7 +239,7 @@ for p in files:
     raws = [r for r in raw_pngs(bytes(new)) if looks_like_icon(bytes(new[r[0]:r[1]]))]
 
     i_hits = 0
-    if (b'modslider' in low or p.endswith('.dylib') or t_hits > 0) and not (is_main and icons > 0):
+    if 'igamegod' in rel_low or b'modslider' in low or t_hits > 0:
         for m, orig, (w, h) in b64s:
             try:
                 png = make_png(len(orig), w, h)
@@ -301,11 +278,7 @@ for ipa in "$WORK"/in/*.ipa; do
   unzip -q "$ipa" -d "$T"
   APP="$(ls -d "$T"/Payload/*.app | head -n1)"
 
-  # List all dylibs and frameworks in the log so we can see where the menu lives
-  echo "  Files inside app bundle:"
-  find "$APP" -maxdepth 3 \( -name "*.dylib" -o -name "*.framework" \) | sed "s|$APP/|    |"
-
-  # 1) App name (preserves exact Info.plist format)
+  # 1) App name
   python3 - "$APP/Info.plist" "$NEW_NAME" <<'PY'
 import plistlib, sys
 path, name = sys.argv[1:3]
@@ -333,16 +306,29 @@ else:
     resize "$NEW_LOGO" "$w" "$h" "$f.new" && mv "$f.new" "$f"
   done < <(find "$APP" -maxdepth 1 -type f \( -iname "AppIcon*.png" -o -iname "Icon*.png" \) -print0)
 
-  # 3) Safe Mod Menu Patch
+  # 3) Patch Mod Menu inside iGameGod framework
   python3 "$WORK/patch_menu.py" "$APP" "$MENU_TITLE" "$MENU_ICON" "$MENU_COLOR_HEX" "$WORK/debug"
 
-  # 4) Red -> Blue in plain text files only
-  for c in FF0000 E50914 FF3B30 E72E2A BD2522; do
-    find "$APP" -type f \( -name "*.json" -o -name "*.css" -o -name "*.js" -o -name "*.html" \) \
-      -exec perl -pi -e "s/#$c/#$MENU_COLOR_HEX/gi" {} +
-  done
+  # 4) Replace menu icons inside iGameGod framework folder if any PNG exists
+  if [ -d "$APP/Frameworks/iGameGod.framework" ]; then
+    while IFS= read -r -d '' f; do
+      read -r w h < <(python3 -c "
+import struct, sys
+b = open(sys.argv[1], 'rb').read(64)
+i = b.find(b'IHDR')
+if i >= 0:
+    print(*struct.unpack('>II', b[i+4:i+12]))
+else:
+    print(0, 0)
+" "$f")
+      if [ "$w" -ge 24 ] && [ "$w" -le 512 ]; then
+        resize "$MENU_ICON" "$w" "$h" "$f.new" && mv "$f.new" "$f"
+        echo "  Replaced framework icon: $f (${w}x${h})"
+      fi
+    done < <(find "$APP/Frameworks/iGameGod.framework" -type f -iname "*.png" -print0)
+  fi
 
-  # 5) Re-pack cleanly (without running ldid so original entitlements stay intact)
+  # 5) Re-pack cleanly without breaking entitlements
   (cd "$T" && zip -qry "$WORK/out/$fname" Payload)
 done
 
