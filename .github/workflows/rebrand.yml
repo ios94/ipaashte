@@ -6,9 +6,9 @@ on:
       app_name:
         description: "New app name"
         required: true
-        default: "My App"
+        default: "CrashArenaTurboStars"
       menu_title:
-        description: "Mod menu title (max 20 characters)"
+        description: "Mod menu title"
         required: true
         default: "Ashte Mod"
       from_tag:
@@ -29,16 +29,13 @@ permissions:
 
 jobs:
   rebrand:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python, Pillow & ldid
-        run: |
-          pip3 install --quiet pillow
-          sudo curl -sL https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_linux_x86_64 -o /usr/local/bin/ldid
-          sudo chmod +x /usr/local/bin/ldid
+      - name: Install Pillow & LIEF
+        run: pip3 install --quiet pillow lief
 
       - name: Run script
         env:
@@ -54,11 +51,3 @@ jobs:
         run: |
           chmod +x ipa-rebrand.sh
           ./ipa-rebrand.sh
-
-      - name: Upload debug files
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-dylibs
-          path: work/debug
-          if-no-files-found: ignore
