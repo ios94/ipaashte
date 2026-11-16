@@ -1,0 +1,40 @@
+name: Rebrand IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: "New app name"
+        required: true
+        default: "My App"
+      from_tag:
+        description: "Release to download IPAs from"
+        required: true
+        default: "V.1"
+      to_tag:
+        description: "Release to upload new IPAs to"
+        required: true
+        default: "V.5"
+      red_hexes:
+        description: "Red colors to replace with white (space separated, no #)"
+        required: true
+        default: "FF0000 E50914 FF3B30"
+
+permissions:
+  contents: write
+
+jobs:
+  rebrand:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run script
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          FROM_TAG: ${{ inputs.from_tag }}
+          TO_TAG: ${{ inputs.to_tag }}
+          NEW_NAME: ${{ inputs.app_name }}
+          NEW_LOGO: logo.png
+          RED_HEXES: ${{ inputs.red_hexes }}
+        run: bash ipa-rebrand.sh
