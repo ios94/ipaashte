@@ -191,7 +191,8 @@ for p in files:
         print(f"  [{rel}] " + "; ".join(info), flush=True)
 
     # --- patch icons (the main executable only if no dylib had any) ---
-    if not (is_main and icons > 0):
+    # only the menu library (it contains the slider code) - never other frameworks like iGameGod
+    if b'modslider' in data and not (is_main and icons > 0):
         for m, orig, (w, h) in b64s:
             try:
                 png = make_png(len(orig), w, h)
