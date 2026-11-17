@@ -19,6 +19,10 @@ on:
         description: "Release to upload new IPAs to"
         required: true
         default: "V.5"
+      ipa_link:
+        description: "OPTIONAL: link of ONE IPA to process (leave empty = all IPAs in from_tag)"
+        required: false
+        default: ""
       telegram_url:
         description: "Your Telegram link (heart button opens this)"
         required: true
@@ -53,6 +57,7 @@ jobs:
           MENU_TITLE: ${{ inputs.menu_title }}
           MENU_COLOR_HEX: ${{ inputs.menu_color_hex }}
           TELEGRAM_URL: ${{ inputs.telegram_url }}
+          IPA_LINK: ${{ inputs.ipa_link }}
         run: |
           chmod +x ipa-rebrand.sh
           ./ipa-rebrand.sh
