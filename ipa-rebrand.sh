@@ -650,10 +650,14 @@ static void scrubViewHierarchy(UIView *view) {
 
     // 3b. Recolor the blue menu (only inside the menu box)
     if ([view isKindOfClass:[UILabel class]]) {
-        NSString *tt = ((UILabel *)view).text;
-        tt = [tt stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (tt && [tt isEqualToString:kNewTitle]) {
+        NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+        NSString *tt = [((UILabel *)view).text stringByTrimmingCharactersInSet:ws];
+        NSString *nt = [kNewTitle stringByTrimmingCharactersInSet:ws];
+        if (tt.length > 0 && nt.length > 0 &&
+            ([tt caseInsensitiveCompare:nt] == NSOrderedSame ||
+             [tt rangeOfString:nt options:NSCaseInsensitiveSearch].location != NSNotFound)) {
             UIView *root = findMenuRoot(view);
+            if (!root) root = view.superview.superview ? view.superview.superview : view.superview;
             if (root) recolorBlueView(root);
         }
     }
