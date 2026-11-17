@@ -7,6 +7,22 @@ REPO="${REPO:-USERNAME/REPO}"
 FROM_TAG="${FROM_TAG:-V.1}"
 TO_TAG="${TO_TAG:-V.5}"
 NEW_NAME="${NEW_NAME:-keep}"
+GAME="${GAME:-all}"                 # all = every game, or part of the IPA file name
+SKIP_EXISTING="${SKIP_EXISTING:-true}"  # true = skip IPAs already uploaded to TO_TAG
+IPA_LINK="${IPA_LINK:-}"             # optional: full release link of ONE ipa to process
+
+LINK_FILE=""
+if [[ -n "$IPA_LINK" ]]; then
+  case "$IPA_LINK" in
+    */releases/download/*/*.ipa) ;;
+    *) echo "Bad link. Expected: https://github.com/OWNER/REPO/releases/download/TAG/File.ipa"; exit 1 ;;
+  esac
+  rest="${IPA_LINK#*/releases/download/}"
+  FROM_TAG="$(python3 -c 'import sys,urllib.parse as u;print(u.unquote(sys.argv[1]))' "${rest%%/*}")"
+  LINK_FILE="$(python3 -c 'import sys,urllib.parse as u;print(u.unquote(sys.argv[1]))' "${rest#*/}")"
+  SKIP_EXISTING="false"
+  echo "== Single IPA mode: tag=$FROM_TAG file=$LINK_FILE"
+fi
 NEW_LOGO="${NEW_LOGO:-logo.png}"
 MENU_TITLE="${MENU_TITLE:-Ashte Mod}"
 MENU_ICON="${MENU_ICON:-menu_icon.png}"
@@ -577,10 +593,29 @@ xcrun --sdk iphoneos clang -arch arm64 -dynamiclib \
   "$WORK/ashte_hook.m" -o "$WORK/libashte.dylib"
 
 echo "== Downloading ALL IPAs from $FROM_TAG"
-gh release download "$FROM_TAG" -R "$REPO" -p "*.ipa" -D "$WORK/in"
+if [[ -n "$LINK_FILE" ]]; then
+  PATTERN="$LINK_FILE"
+elif [[ -z "$GAME" || "$GAME" == "all" ]]; then
+  PATTERN="*.ipa"
+else
+  PATTERN="*${GAME}*.ipa"
+fi
+echo "== Pattern: $PATTERN"
+gh release download "$FROM_TAG" -R "$REPO" -p "$PATTERN" -D "$WORK/in"
+
+# Names already present in the target release (so old games are not redone)
+EXISTING="$WORK/existing.txt"
+: > "$EXISTING"
+if [[ "$SKIP_EXISTING" == "true" && "$GAME" == "all" ]]; then
+  gh release view "$TO_TAG" -R "$REPO" --json assets -q '.assets[].name' >"$EXISTING" 2>/dev/null || true
+fi
 
 for ipa in "$WORK"/in/*.ipa; do
   fname="$(basename "$ipa")"
+  if grep -Fxq "$fname" "$EXISTING"; then
+    echo "== Skipping (already in $TO_TAG): $fname"
+    continue
+  fi
   echo "=========================================="
   echo "== Processing: $fname"
   T="$WORK/tmp"
@@ -734,7 +769,13 @@ done
 echo "== Uploading all rebranded IPAs to $TO_TAG"
 gh release view "$TO_TAG" -R "$REPO" >/dev/null 2>&1 || \
   gh release create "$TO_TAG" -R "$REPO" -t "$TO_TAG" -n "Rebranded IPAs"
-gh release upload "$TO_TAG" "$WORK"/out/*.ipa -R "$REPO" --clobber
+shopt -s nullglob
+OUT_FILES=("$WORK"/out/*.ipa)
+if [[ ${#OUT_FILES[@]} -eq 0 ]]; then
+  echo "Nothing new to upload."
+else
+  gh release upload "$TO_TAG" "${OUT_FILES[@]}" -R "$REPO" --clobber
+fi
 
 rm -rf "$WORK/tmp"
 echo "Done."
