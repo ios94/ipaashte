@@ -12,16 +12,30 @@ SKIP_EXISTING="${SKIP_EXISTING:-true}"  # true = skip IPAs already uploaded to T
 IPA_LINK="${IPA_LINK:-}"             # optional: full release link of ONE ipa to process
 
 LINK_FILE=""
+DIRECT_URL=""
+SRC_REPO=""
 if [[ -n "$IPA_LINK" ]]; then
-  case "$IPA_LINK" in
-    */releases/download/*/*.ipa) ;;
-    *) echo "Bad link. Expected: https://github.com/OWNER/REPO/releases/download/TAG/File.ipa"; exit 1 ;;
-  esac
-  rest="${IPA_LINK#*/releases/download/}"
-  FROM_TAG="$(python3 -c 'import sys,urllib.parse as u;print(u.unquote(sys.argv[1]))' "${rest%%/*}")"
-  LINK_FILE="$(python3 -c 'import sys,urllib.parse as u;print(u.unquote(sys.argv[1]))' "${rest#*/}")"
   SKIP_EXISTING="false"
-  echo "== Single IPA mode: tag=$FROM_TAG file=$LINK_FILE"
+  case "$IPA_LINK" in
+    https://github.com/*/releases/download/*/*)
+      # GitHub release asset (this repo or any other repo)
+      SRC_REPO="${IPA_LINK#https://github.com/}"
+      SRC_REPO="${SRC_REPO%%/releases/*}"
+      rest="${IPA_LINK#*/releases/download/}"
+      FROM_TAG="$(python3 -c 'import sys,urllib.parse as u;print(u.unquote(sys.argv[1]))' "${rest%%/*}")"
+      LINK_FILE="$(python3 -c 'import sys,urllib.parse as u;print(u.unquote(sys.argv[1]))' "${rest#*/}")"
+      echo "== GitHub release link: repo=$SRC_REPO tag=$FROM_TAG file=$LINK_FILE"
+      ;;
+    http://*|https://*)
+      # Any other direct link (Dropbox, Google Drive, your own server, ...)
+      DIRECT_URL="$IPA_LINK"
+      echo "== Direct link mode"
+      ;;
+    *)
+      echo "Bad link. It must start with http:// or https://"
+      exit 1
+      ;;
+  esac
 fi
 NEW_LOGO="${NEW_LOGO:-logo.png}"
 MENU_TITLE="${MENU_TITLE:-Ashte Mod}"
@@ -855,16 +869,89 @@ xcrun --sdk iphoneos clang -arch arm64 -dynamiclib \
   -install_name "@executable_path/Frameworks/libashte.dylib" \
   "$WORK/ashte_hook.m" -o "$WORK/libashte.dylib"
 
-echo "== Downloading ALL IPAs from $FROM_TAG"
-if [[ -n "$LINK_FILE" ]]; then
-  PATTERN="$LINK_FILE"
-elif [[ -z "$GAME" || "$GAME" == "all" ]]; then
-  PATTERN="*.ipa"
+download_direct() {
+  local url="$1"
+  local hdr="$WORK/dl_headers.txt" tmp="$WORK/dl_file.bin"
+  mkdir -p "$WORK/in"
+  rm -f "$hdr" "$tmp"
+  url="$(python3 - "$url" <<'PYN'
+import sys, re
+u = sys.argv[1].strip()
+if 'dropbox.com' in u:
+    if re.search(r'([?&])dl=0', u):
+        u = re.sub(r'([?&])dl=0', r'\1dl=1', u)
+    elif 'dl=1' not in u:
+        u += ('&' if '?' in u else '?') + 'dl=1'
+m = re.search(r'drive\.google\.com/file/d/([A-Za-z0-9_-]+)', u) or re.search(r'drive\.google\.com/.*[?&]id=([A-Za-z0-9_-]+)', u)
+if m:
+    u = 'https://drive.usercontent.google.com/download?id=%s&export=download&confirm=t' % m.group(1)
+print(u)
+PYN
+)"
+  echo "== Downloading: $url"
+  curl -L --fail --retry 3 --connect-timeout 30 -A "Mozilla/5.0" -D "$hdr" -o "$tmp" "$url"
+  local name
+  name="$(python3 - "$hdr" "$url" <<'PYN'
+import sys, re, urllib.parse as up
+hdr, url = sys.argv[1], sys.argv[2]
+name = ''
+try:
+    txt = open(hdr, encoding='latin-1').read()
+    ms = re.findall(r"(?im)^content-disposition:.*$", txt)
+    if ms:
+        m = re.search(r"filename\*=(?:UTF-8'')?([^;\r\n]+)", ms[-1], re.I) or re.search(r'filename="?([^";\r\n]+)"?', ms[-1], re.I)
+        if m:
+            name = up.unquote(m.group(1).strip().strip('"'))
+except Exception:
+    pass
+if not name:
+    path = up.unquote(up.urlparse(url).path)
+    name = path.rstrip('/').split('/')[-1]
+name = re.sub(r'[^A-Za-z0-9._-]+', '_', name).strip('._') or 'app'
+if not name.lower().endswith('.ipa'):
+    name += '.ipa'
+print(name)
+PYN
+)"
+  if ! python3 - "$tmp" <<'PYN'
+import sys, zipfile
+try:
+    z = zipfile.ZipFile(sys.argv[1])
+    ok = any(n.startswith('Payload/') and n.endswith('.app/Info.plist') for n in z.namelist())
+except Exception:
+    ok = False
+sys.exit(0 if ok else 1)
+PYN
+  then
+    echo "ERROR: the link did not give a real IPA file (it may be a web page, not a direct download link)."
+    exit 1
+  fi
+  mv "$tmp" "$WORK/in/$name"
+  echo "== Saved as: $name"
+}
+
+mkdir -p "$WORK/in"
+if [[ -n "$DIRECT_URL" ]]; then
+  download_direct "$DIRECT_URL"
 else
-  PATTERN="*${GAME}*.ipa"
+  echo "== Downloading ALL IPAs from $FROM_TAG"
+  if [[ -n "$LINK_FILE" ]]; then
+    PATTERN="$LINK_FILE"
+  elif [[ -z "$GAME" || "$GAME" == "all" ]]; then
+    PATTERN="*.ipa"
+  else
+    PATTERN="*${GAME}*.ipa"
+  fi
+  echo "== Pattern: $PATTERN"
+  if ! gh release download "$FROM_TAG" -R "${SRC_REPO:-$REPO}" -p "$PATTERN" -D "$WORK/in"; then
+    if [[ -n "$SRC_REPO" ]]; then
+      echo "== gh download failed, trying direct download"
+      download_direct "$IPA_LINK"
+    else
+      exit 1
+    fi
+  fi
 fi
-echo "== Pattern: $PATTERN"
-gh release download "$FROM_TAG" -R "$REPO" -p "$PATTERN" -D "$WORK/in"
 
 # Names already present in the target release (so old games are not redone)
 EXISTING="$WORK/existing.txt"
