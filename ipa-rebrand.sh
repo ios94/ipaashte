@@ -27,6 +27,8 @@ NEW_LOGO="${NEW_LOGO:-logo.png}"
 MENU_TITLE="${MENU_TITLE:-Ashte Mod}"
 MENU_ICON="${MENU_ICON:-menu_icon.png}"
 MENU_COLOR_HEX="${MENU_COLOR_HEX:-1E64E8}"
+MENU_MODERN="${MENU_MODERN:-true}"   # true = rounded/modern menu look, false = keep original shape
+if [[ "$MENU_MODERN" == "true" ]]; then MODERN_FLAG=1; else MODERN_FLAG=0; fi
 TELEGRAM_URL="${TELEGRAM_URL:-https://t.me/ashtemobile}"
 
 if [[ ! -f "$MENU_ICON" ]]; then
@@ -70,6 +72,7 @@ cat > "$WORK/ashte_hook.m" <<EOF
 #import <objc/runtime.h>
 
 static NSString *const kNewTitle = @"${MENU_TITLE}";
+static const BOOL kAshteModern = ${MODERN_FLAG};
 static NSString *const kTelegramURL = @"${TELEGRAM_URL}";
 static NSHashTable<UIWindow *> *gKnownWindows = nil;
 
@@ -536,6 +539,83 @@ static UIView *findMenuRoot(UIView *label) {
     return best;
 }
 
+// ---- Modern menu look (rounded, soft shadow, cleaner text) ----
+static NSHashTable *gAshteStyled = nil;
+
+static BOOL ashteAccentIsLight(void) {
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    [ashteBlueRepl(NO, 1.0) getRed:&r green:&g blue:&b alpha:&a];
+    return (0.299 * r + 0.587 * g + 0.114 * b) > 0.62;
+}
+
+static BOOL ashteIsDarkText(UIColor *c) {
+    if (!c) return YES;
+    CGFloat r = 0, g = 0, b = 0, a = 0, w = 0;
+    if ([c getRed:&r green:&g blue:&b alpha:&a]) {
+        return (0.299 * r + 0.587 * g + 0.114 * b) < 0.35;
+    }
+    if ([c getWhite:&w alpha:&a]) return w < 0.35;
+    return NO;
+}
+
+static void ashteStyleTree(UIView *v, UIView *root, BOOL light) {
+    if (!v) return;
+    if ([v isKindOfClass:[UILabel class]]) {
+        UILabel *l = (UILabel *)v;
+        if (![gAshteStyled containsObject:l]) {
+            [gAshteStyled addObject:l];
+            NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+            NSString *t = [l.text stringByTrimmingCharactersInSet:ws];
+            NSString *nt = [kNewTitle stringByTrimmingCharactersInSet:ws];
+            BOOL isTitle = (t.length > 0 && [t caseInsensitiveCompare:nt] == NSOrderedSame);
+            CGFloat sz = l.font ? l.font.pointSize : 16.0;
+            l.font = [UIFont systemFontOfSize:sz weight:(isTitle ? UIFontWeightBold : UIFontWeightSemibold)];
+            if (!light && ashteIsDarkText(l.textColor)) {
+                l.textColor = [UIColor whiteColor];
+            }
+        }
+    } else if (v != root && v.bounds.size.height <= 1.6 && v.bounds.size.width >= root.bounds.size.width * 0.5) {
+        v.backgroundColor = light ? [UIColor colorWithWhite:0.0 alpha:0.12]
+                                  : [UIColor colorWithWhite:1.0 alpha:0.28];
+    }
+    for (UIView *sub in [v.subviews copy]) ashteStyleTree(sub, root, light);
+}
+
+static void ashteModernize(UIView *root) {
+    if (!root) return;
+    if (!gAshteStyled) gAshteStyled = [NSHashTable weakObjectsHashTable];
+    BOOL light = ashteAccentIsLight();
+    CGFloat radius = 20.0;
+
+    root.layer.cornerRadius = radius;
+    if (@available(iOS 13.0, *)) root.layer.cornerCurve = kCACornerCurveContinuous;
+    root.layer.masksToBounds = YES;
+    root.layer.borderWidth = 1.0;
+    root.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.30].CGColor;
+
+    UIView *host = root.superview;
+    if (host && ![host isKindOfClass:[UIWindow class]]) {
+        host.layer.shadowColor = [UIColor blackColor].CGColor;
+        host.layer.shadowOpacity = 0.35;
+        host.layer.shadowRadius = 18.0;
+        host.layer.shadowOffset = CGSizeMake(0, 8);
+        host.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:root.frame cornerRadius:radius].CGPath;
+    }
+
+    ashteStyleTree(root, root, light);
+
+    if (![gAshteStyled containsObject:root]) {
+        [gAshteStyled addObject:root];
+        CGFloat a0 = root.alpha;
+        root.alpha = 0.0;
+        root.transform = CGAffineTransformMakeScale(0.94, 0.94);
+        [UIView animateWithDuration:0.22 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+            root.alpha = a0;
+            root.transform = CGAffineTransformIdentity;
+        } completion:nil];
+    }
+}
+
 static BOOL isIOSGodsNoticeText(NSString *s) {
     if (!s || s.length == 0) return NO;
     NSArray<NSString *> *keys = @[
@@ -658,7 +738,10 @@ static void scrubViewHierarchy(UIView *view) {
              [tt rangeOfString:nt options:NSCaseInsensitiveSearch].location != NSNotFound)) {
             UIView *root = findMenuRoot(view);
             if (!root) root = view.superview.superview ? view.superview.superview : view.superview;
-            if (root) recolorBlueView(root);
+            if (root) {
+                recolorBlueView(root);
+                if (kAshteModern) ashteModernize(root);
+            }
         }
     }
 
