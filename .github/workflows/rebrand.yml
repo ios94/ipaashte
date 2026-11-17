@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       app_name:
-        description: "New app name (name)"
+        description: "New app name (leave as 'keep' to keep each game's original name)"
         required: true
         default: "keep"
       menu_title:
         description: "Mod menu title"
         required: true
-        default: "Ashte Mobile 📱"
+        default: "Ashte Mod"
       from_tag:
         description: "Release to download IPAs from"
         required: true
@@ -20,15 +20,15 @@ on:
         required: true
         default: "V.5"
       menu_color_hex:
-        description: "New menu1E64E8)"
+        description: "New menu color in HEX (Blue default: 1E64E8)"
         required: true
-        default: "8B5CF6"
+        default: "1E64E8"
       menu_modern:
-        description: "(true/false)"
+        description: "Modern rounded menu look (true/false)"
         required: true
         default: "true"
       ipa_link:
-        description: "Optional= all IPAs)"
+        description: "Optional: ANY direct link of ONE IPA (GitHub, Dropbox, Google Drive, any site). Empty = all IPAs from from_tag"
         required: false
         default: ""
 
