@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ipa-rebrand.sh (Universal Multi-IPA Edition + Hardcore ViP Blocker)
+# ipa-rebrand.sh (Universal Multi-IPA + Block "Join ViP" Screen + Blue Menu + Telegram Popup)
 
 set -euo pipefail
 
@@ -46,16 +46,13 @@ print(f"{r:.4f} {g:.4f} {b:.4f} {r*0.75:.4f} {g*0.75:.4f} {b*0.75:.4f}")
 PY
 )
 
-SAFE_TITLE=$(python3 -c 'import sys; print(sys.argv[1].replace("\\", "\\\\").replace("\"", "\\\""))' "$MENU_TITLE")
-SAFE_URL=$(python3 -c 'import sys; print(sys.argv[1].replace("\\", "\\\\").replace("\"", "\\\""))' "$TELEGRAM_URL")
-
 # 1) Build the Universal Runtime Objective-C Hook Dylib (libashte.dylib)
 cat > "$WORK/ashte_hook.m" <<EOF
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-static NSString *const kNewTitle = @"${SAFE_TITLE}";
-static NSString *const kTelegramURL = @"${SAFE_URL}";
+static NSString *const kNewTitle = @"${MENU_TITLE}";
+static NSString *const kTelegramURL = @"${TELEGRAM_URL}";
 
 static UIImage *getCustomMenuIcon(void) {
     static UIImage *cachedIcon = nil;
@@ -92,123 +89,45 @@ static BOOL isMenuRed(UIColor *color, BOOL *isDarkHeader) {
     return NO;
 }
 
-// پشکنینی هەموو جۆرە تێکستێک (ئاسایی، Attributed، دوگمە، Accessibility)
-static BOOL isViPString(NSString *s) {
-    if (!s || s.length < 5) return NO;
-    if ([s rangeOfString:@"Join the ViP" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [s rangeOfString:@"Unlimited Feature Access" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [s rangeOfString:@"ViP purchases are non-refundable" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [s rangeOfString:@"Priority Requests" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [s rangeOfString:@"Get access to all hack features" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [s rangeOfString:@"Enjoy an ad-free experience" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [s isEqualToString:@"Maybe Later"] ||
-        [s isEqualToString:@"Join Now!"]) {
-        return YES;
-    }
-    return NO;
-}
-
-static NSString *extractViewText(UIView *view) {
-    if (!view) return nil;
-    if ([view isKindOfClass:[UILabel class]]) {
-        UILabel *l = (UILabel *)view;
-        if (l.text.length > 0) return l.text;
-        if (l.attributedText.string.length > 0) return l.attributedText.string;
-    } else if ([view isKindOfClass:[UIButton class]]) {
-        UIButton *b = (UIButton *)view;
-        NSString *t = [b titleForState:UIControlStateNormal] ?: b.titleLabel.text ?: b.currentAttributedTitle.string;
-        if (t.length > 0) return t;
-    } else if ([view isKindOfClass:[UITextView class]]) {
-        UITextView *tv = (UITextView *)view;
-        if (tv.text.length > 0) return tv.text;
-        if (tv.attributedText.string.length > 0) return tv.attributedText.string;
-    }
-    if (view.accessibilityLabel.length > 0) return view.accessibilityLabel;
-    return nil;
-}
-
-static BOOL containsViPPopupContent(UIView *view) {
+// Check if a view hierarchy belongs to the "Join ViP" promo screen
+static BOOL isJoinVipView(UIView *view) {
     if (!view) return NO;
-    NSString *cls = NSStringFromClass([view class]);
-    if ([cls rangeOfString:@"VIP" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [cls rangeOfString:@"Upsell" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [cls rangeOfString:@"Paywall" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-        return YES;
+    if ([view isKindOfClass:[UILabel class]]) {
+        NSString *t = ((UILabel *)view).text;
+        if (t && ([t rangeOfString:@"Join the ViP" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                  [t rangeOfString:@"Unlimited Feature Access" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                  [t rangeOfString:@"Priority Requests" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                  [t rangeOfString:@"ViP purchases are non-refundable" options:NSCaseInsensitiveSearch].location != NSNotFound)) {
+            return YES;
+        }
     }
-    NSString *txt = extractViewText(view);
-    if (isViPString(txt)) return YES;
-
+    if ([view isKindOfClass:[UIButton class]]) {
+        NSString *bt = [((UIButton *)view) titleForState:UIControlStateNormal];
+        if (bt && ([bt isEqualToString:@"Maybe Later"] || [bt isEqualToString:@"Join Now!"])) {
+            return YES;
+        }
+    }
     for (UIView *sub in [view.subviews copy]) {
-        if (containsViPPopupContent(sub)) return YES;
+        if (isJoinVipView(sub)) return YES;
     }
     return NO;
 }
 
-// سڕینەوەی تەواوەتی پەنجەرەی ViP (چ ViewController بێت، چ UIWindow، چ Subview)
-static void nukeViPFromView(UIView *view) {
-    if (!view) return;
-
-    // ئەگەر دوگمەی Maybe Later بوو، خۆکارانە دایبگرە با مۆدەکە خۆی دایبخات
+// Find and trigger "Maybe Later" button if present, or dismiss/remove the ViP view
+static BOOL triggerMaybeLaterIfPresent(UIView *view) {
+    if (!view) return NO;
     if ([view isKindOfClass:[UIButton class]]) {
         UIButton *btn = (UIButton *)view;
-        NSString *bt = extractViewText(btn) ?: @"";
-        if ([bt rangeOfString:@"Maybe Later" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        NSString *bt = [btn titleForState:UIControlStateNormal] ?: btn.titleLabel.text;
+        if (bt && [bt rangeOfString:@"Maybe Later" options:NSCaseInsensitiveSearch].location != NSNotFound) {
             [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
+            return YES;
         }
     }
-
-    // ١) گەڕان بەدوای UIViewController بۆ داخستنی فەرمی
-    UIResponder *resp = view;
-    UIViewController *foundVC = nil;
-    while (resp) {
-        if ([resp isKindOfClass:[UIViewController class]]) {
-            foundVC = (UIViewController *)resp;
-            break;
-        }
-        resp = [resp nextResponder];
+    for (UIView *sub in [view.subviews copy]) {
+        if (triggerMaybeLaterIfPresent(sub)) return YES;
     }
-
-    if (foundVC) {
-        if (foundVC.presentingViewController) {
-            [foundVC dismissViewControllerAnimated:NO completion:nil];
-            return;
-        }
-        if (foundVC.navigationController && foundVC.navigationController.viewControllers.count > 1) {
-            [foundVC.navigationController popViewControllerAnimated:NO];
-            return;
-        }
-        if (foundVC.parentViewController) {
-            [foundVC willMoveToParentViewController:nil];
-            [foundVC.view removeFromSuperview];
-            [foundVC removeFromParentViewController];
-            return;
-        }
-    }
-
-    // ٢) ئەگەر لەسەر UIWindowـی تایبەت بوو (کە iGameGod زۆرجار بەکاریدەهێنێت)
-    UIWindow *win = view.window;
-    UIWindow *mainWin = [UIApplication sharedApplication].delegate.window;
-    if (win && win != mainWin && win.windowLevel >= UIWindowLevelNormal) {
-        if (foundVC && win.rootViewController == foundVC) {
-            win.hidden = YES;
-            win.alpha = 0.0;
-            win.userInteractionEnabled = NO;
-            win.rootViewController = nil;
-            return;
-        }
-    }
-
-    // ٣) دۆزینەوەی گەورەترین قاڵبی پەنجەرەکە و شاردنەوەی
-    UIView *container = view;
-    while (container.superview &&
-           ![container.superview isKindOfClass:[UIWindow class]] &&
-           container.superview != mainWin.rootViewController.view) {
-        container = container.superview;
-    }
-    container.hidden = YES;
-    container.alpha = 0.0;
-    container.userInteractionEnabled = NO;
-    [container removeFromSuperview];
+    return NO;
 }
 
 static void openTelegramChannel(void) {
@@ -227,6 +146,7 @@ static void openTelegramChannel(void) {
     });
 }
 
+// Redirect any external social/mod URL to Telegram
 static void (*orig_openURL_opts)(id, SEL, NSURL *, NSDictionary *, void (^)(BOOL)) = NULL;
 static void hooked_openURL_opts(id self, SEL _cmd, NSURL *url, NSDictionary *options, void (^completion)(BOOL)) {
     NSString *s = url.absoluteString.lowercaseString ?: @"";
@@ -245,16 +165,9 @@ static BOOL hooked_openURL(id self, SEL _cmd, NSURL *url) {
     return orig_openURL(self, _cmd, url);
 }
 
-static void (*orig_viewDidAppear)(id, SEL, BOOL) = NULL;
-static void hooked_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
-    orig_viewDidAppear(self, _cmd, animated);
-    NSString *vcClass = NSStringFromClass([self class]);
-    if ([vcClass rangeOfString:@"VIP" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        containsViPPopupContent(self.view)) {
-        nukeViPFromView(self.view);
-    }
-}
-
+// Intercept UIViewController presentation to:
+// 1. Block the "Join ViP" promo screen completely
+// 2. Replace the multi-button credit alert with ONLY "Telegram" + "Dismiss"
 static void (*orig_presentVC)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *vcToPresent, BOOL flag, void (^completion)(void)) {
     if (!vcToPresent) {
@@ -262,16 +175,18 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *vcToPresent, B
         return;
     }
 
-    // Force view load to inspect its contents before presenting
-    UIView *v = vcToPresent.view;
-    [v layoutIfNeeded];
-
-    NSString *vcClass = NSStringFromClass([vcToPresent class]);
-    if ([vcClass rangeOfString:@"VIP" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [vcClass rangeOfString:@"Paywall" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        containsViPPopupContent(v)) {
+    NSString *vcClass = NSStringFromClass([vcToPresent class]).lowercaseString ?: @"";
+    if ([vcClass containsString:@"vip"] || [vcClass containsString:@"promo"] || [vcClass containsString:@"paywall"]) {
         if (completion) completion();
         return;
+    }
+
+    if (![vcToPresent isKindOfClass:[UIAlertController class]]) {
+        [vcToPresent loadViewIfNeeded];
+        if (isJoinVipView(vcToPresent.view)) {
+            if (completion) completion();
+            return;
+        }
     }
 
     if ([vcToPresent isKindOfClass:[UIAlertController class]]) {
@@ -351,14 +266,7 @@ static void scrubLayer(CALayer *layer) {
 static void scrubViewHierarchy(UIView *view) {
     if (!view || view.hidden) return;
 
-    // 0. پشکنینی خێرا بۆ سڕینەوەی پەنجەرەی Join ViP
-    NSString *vText = extractViewText(view);
-    if (isViPString(vText)) {
-        nukeViPFromView(view);
-        return;
-    }
-
-    // 1. Change Red menu background, switch buttons & layers to custom color
+    // 1. Change Red menu background, switch buttons & layers to Blue
     BOOL isHeader = NO;
     if (isMenuRed(view.backgroundColor, &isHeader)) {
         CGFloat alpha = CGColorGetAlpha(view.backgroundColor.CGColor);
@@ -373,7 +281,7 @@ static void scrubViewHierarchy(UIView *view) {
     }
     scrubLayer(view.layer);
 
-    // 2. Change UISlider & UISwitch red tints
+    // 2. Change UISlider & UISwitch red tints to Blue
     if ([view isKindOfClass:[UISlider class]]) {
         UISlider *slider = (UISlider *)view;
         slider.minimumTrackTintColor = [UIColor colorWithRed:${HR_FLT} green:${HG_FLT} blue:${HB_FLT} alpha:1.0];
@@ -445,45 +353,62 @@ static NSArray<UIWindow *> *getAllWindows(void) {
     return [set allObjects];
 }
 
+static void dismissJoinVipIfVisible(UIWindow *win) {
+    if (!win) return;
+    // Check presented view controllers on this window
+    UIViewController *vc = win.rootViewController;
+    while (vc.presentedViewController) {
+        UIViewController *pres = vc.presentedViewController;
+        if (![pres isKindOfClass:[UIAlertController class]] && isJoinVipView(pres.view)) {
+            if (!triggerMaybeLaterIfPresent(pres.view)) {
+                [pres dismissViewControllerAnimated:NO completion:nil];
+            }
+            return;
+        }
+        vc = pres;
+    }
+    // Also check if Join ViP was added directly as a subview or custom window
+    if (isJoinVipView(win)) {
+        if (!triggerMaybeLaterIfPresent(win)) {
+            for (UIView *sub in [win.subviews copy]) {
+                if (isJoinVipView(sub)) {
+                    sub.hidden = YES;
+                    [sub removeFromSuperview];
+                }
+            }
+        }
+    }
+}
+
 __attribute__((constructor))
 static void initAshteHook(void) {
-    Method mPres = class_getInstanceMethod([UIViewController class], @selector(presentViewController:animated:completion:));
-    if (mPres) {
-        orig_presentVC = (void *)method_getImplementation(mPres);
-        method_setImplementation(mPres, (IMP)hooked_presentVC);
-    }
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Method mPres = class_getInstanceMethod([UIViewController class], @selector(presentViewController:animated:completion:));
+        if (mPres) {
+            orig_presentVC = (void *)method_getImplementation(mPres);
+            method_setImplementation(mPres, (IMP)hooked_presentVC);
+        }
 
-    Method mAppear = class_getInstanceMethod([UIViewController class], @selector(viewDidAppear:));
-    if (mAppear) {
-        orig_viewDidAppear = (void *)method_getImplementation(mAppear);
-        method_setImplementation(mAppear, (IMP)hooked_viewDidAppear);
-    }
+        Method mOpenOpts = class_getInstanceMethod([UIApplication class], @selector(openURL:options:completionHandler:));
+        if (mOpenOpts) {
+            orig_openURL_opts = (void *)method_getImplementation(mOpenOpts);
+            method_setImplementation(mOpenOpts, (IMP)hooked_openURL_opts);
+        }
+        Method mOpen = class_getInstanceMethod([UIApplication class], @selector(openURL:));
+        if (mOpen) {
+            orig_openURL = (void *)method_getImplementation(mOpen);
+            method_setImplementation(mOpen, (IMP)hooked_openURL);
+        }
 
-    Method mOpenOpts = class_getInstanceMethod([UIApplication class], @selector(openURL:options:completionHandler:));
-    if (mOpenOpts) {
-        orig_openURL_opts = (void *)method_getImplementation(mOpenOpts);
-        method_setImplementation(mOpenOpts, (IMP)hooked_openURL_opts);
-    }
-    Method mOpen = class_getInstanceMethod([UIApplication class], @selector(openURL:));
-    if (mOpen) {
-        orig_openURL = (void *)method_getImplementation(mOpen);
-        method_setImplementation(mOpen, (IMP)hooked_openURL);
-    }
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [NSTimer scheduledTimerWithTimeInterval:0.08 repeats:YES block:^(NSTimer * _Nonnull timer) {
-            for (UIWindow *win in getAllWindows()) {
-                if (win.hidden) continue;
-                UIViewController *topVC = win.rootViewController;
-                while (topVC.presentedViewController) {
-                    topVC = topVC.presentedViewController;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [NSTimer scheduledTimerWithTimeInterval:0.10 repeats:YES block:^(NSTimer * _Nonnull timer) {
+                for (UIWindow *win in getAllWindows()) {
+                    dismissJoinVipIfVisible(win);
+                    scrubViewHierarchy(win);
                 }
-                if (topVC && containsViPPopupContent(topVC.view)) {
-                    nukeViPFromView(topVC.view);
-                }
-                scrubViewHierarchy(win);
-            }
-        }];
+            }];
+        });
     });
 }
 EOF
@@ -511,8 +436,6 @@ for ipa in "$WORK"/in/*.ipa; do
   unzip -q "$ipa" -d "$T"
   APP="$(ls -d "$T"/Payload/*.app | head -n1)"
 
-  find "$APP" -name "_CodeSignature" -type d -exec rm -rf {} +
-
   # 1) Keep original game name unless user explicitly typed a custom name
   if [[ -n "$NEW_NAME" && "$NEW_NAME" != "My App" && "$NEW_NAME" != "keep" ]]; then
     python3 - "$APP/Info.plist" "$NEW_NAME" <<'PY'
@@ -529,7 +452,7 @@ with open(path, 'wb') as f:
 PY
   fi
 
-  # 2) Patch embedded base64 icons & plain text titles inside ANY dylib in the entire app
+  # 2) Patch embedded base64 icons & plain text titles inside ANY dylib or iGameGod binary
   python3 - "$APP" "$MENU_ICON" "$MENU_TITLE" <<'PY'
 import sys, os, re, io, base64, struct, zlib
 from PIL import Image
@@ -619,7 +542,7 @@ PY
   cp "$WORK/libashte.dylib" "$APP/Frameworks/libashte.dylib"
   resize "$MENU_ICON" 120 120 "$APP/ashte_menu_icon.png"
 
-  # 4) Universal Injection: Inject into ALL mod dylibs + Main Executable (Every binary loads it!)
+  # 4) Universal Injection: Inject into mod dylibs, iGameGod, AND Main Executable so it ALWAYS loads!
   python3 - "$APP" <<'PY'
 import os, sys, plistlib, lief
 
@@ -630,27 +553,23 @@ with open(os.path.join(app, "Info.plist"), "rb") as f:
 targets = []
 for root, _, names in os.walk(app):
     for n in names:
-        if n.endswith(".dylib") and n not in ("libashte.dylib", "CydiaSubstrate.dylib", "libsubstitute.dylib", "libellekit.dylib"):
+        if n in ("libashte.dylib", "CydiaSubstrate.dylib", "libsubstitute.dylib"):
+            continue
+        if n.endswith(".dylib") or n == "iGameGod":
             targets.append(os.path.join(root, n))
 
 main_path = os.path.join(app, main_exe)
-if os.path.isfile(main_path):
+if os.path.isfile(main_path) and main_path not in targets:
     targets.append(main_path)
-
-dylib_ref = "@executable_path/libashte.dylib"
 
 for t in targets:
     rel = os.path.relpath(t, app)
     try:
         b = lief.parse(t)
         if b:
-            existing = [lib.name for lib in b.libraries]
-            if dylib_ref in existing:
-                print(f"  Already linked in {rel}")
-                continue
-            b.add_library(dylib_ref)
+            b.add_library("@executable_path/libashte.dylib")
             b.write(t)
-            print(f"  Injected {dylib_ref} -> {rel}")
+            print(f"  Injected @executable_path/libashte.dylib -> {rel}")
     except Exception as e:
         print(f"  Skipped {rel}: {e}")
 PY
