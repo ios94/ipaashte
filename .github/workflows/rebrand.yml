@@ -27,6 +27,10 @@ on:
         description: "Modern rounded menu look (true/false)"
         required: true
         default: "true"
+      ipa_link:
+        description: "Optional: link of ONE IPA from a release (leave empty = all IPAs)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -53,6 +57,7 @@ jobs:
           MENU_TITLE: ${{ inputs.menu_title }}
           MENU_COLOR_HEX: ${{ inputs.menu_color_hex }}
           MENU_MODERN: ${{ inputs.menu_modern }}
+          IPA_LINK: ${{ inputs.ipa_link }}
         run: |
           chmod +x ipa-rebrand.sh
           ./ipa-rebrand.sh
