@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ipa-rebrand.sh (Universal Frameworks Injection + Auto-Kill "Join ViP" + Blue Menu + Telegram Popup)
+# ipa-rebrand.sh (Universal Frameworks Injection + Auto-Kill "Join ViP" + Blue Menu + Telegram Popup + Check0ver rename)
 
 set -euo pipefail
 
@@ -546,12 +546,15 @@ static void scrubViewHierarchy(UIView *view) {
         }
     }
 
-    // 3. Change Labels ("Made for iOSGods.com" -> Ashte Mod)
+    // 3. Change Labels ("Made for iOSGods.com" / "Check0ver Team" -> Ashte Mod)
     if ([view isKindOfClass:[UILabel class]]) {
         UILabel *lbl = (UILabel *)view;
         NSString *txt = lbl.text ?: lbl.attributedText.string;
         if (txt) {
-            if ([txt rangeOfString:@"Twitter" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            if ([txt rangeOfString:@"Check0ver" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                [txt rangeOfString:@"Checkover" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                lbl.text = kNewTitle;
+            } else if ([txt rangeOfString:@"Twitter" options:NSCaseInsensitiveSearch].location != NSNotFound) {
                 lbl.text = @"Telegram";
             } else if ([txt rangeOfString:@"iOSGods" options:NSCaseInsensitiveSearch].location != NSNotFound ||
                        [txt rangeOfString:@"Made for" options:NSCaseInsensitiveSearch].location != NSNotFound) {
@@ -561,14 +564,18 @@ static void scrubViewHierarchy(UIView *view) {
     }
 
     // 4. Replace mascot/avatar icon in menu header & floating button with custom logo
+    //    (square-ish icons, and the taller Check0ver mascot that overhangs the header)
     UIImage *customImg = getCustomMenuIcon();
     if (customImg && view.tag != 994411) {
         CGSize sz = view.bounds.size;
-        if (sz.width >= 20 && sz.width <= 105 && sz.height >= 20 && sz.height <= 105 && fabs(sz.width - sz.height) <= 18) {
+        BOOL squareish = (sz.width >= 20 && sz.width <= 105 && sz.height >= 20 && sz.height <= 105 && fabs(sz.width - sz.height) <= 18);
+        BOOL tallMascot = (sz.width >= 50 && sz.width <= 105 && sz.height > sz.width && sz.height <= 140 && sz.height <= sz.width * 1.7);
+        if (squareish || tallMascot) {
             if ([view isKindOfClass:[UIImageView class]]) {
                 UIImageView *iv = (UIImageView *)view;
                 if (iv.image && iv.frame.origin.x < 120) {
                     iv.image = customImg;
+                    iv.contentMode = UIViewContentModeScaleAspectFit;
                     view.tag = 994411;
                 }
             } else if ([view isKindOfClass:[UIButton class]]) {
@@ -775,12 +782,23 @@ def make_png(target, w, h):
 
 rep20 = title.encode('utf-8')[:20].ljust(20, b' ')
 
+# Same-length replacement so Mach-O offsets never move (UTF-8 and UTF-16LE variants)
+def same_len(old_str, new_title, enc):
+    o = old_str.encode(enc)
+    unit = 2 if enc == 'utf-16-le' else 1
+    t = new_title.encode(enc)[:len(o)]
+    t = t + (' '.encode(enc)) * ((len(o) - len(t)) // unit)
+    return o, t
+
+NAME_VARIANTS = ("Check0ver Team", "CHECK0VER TEAM", "Check0ver team", "Checkover Team")
+
 for root, _, names in os.walk(app):
     for n in names:
         p = os.path.join(root, n)
         if os.path.islink(p) or not os.path.isfile(p):
             continue
-        if not (n.endswith(".dylib") or 'igamegod' in n.lower()):
+        low = n.lower()
+        if not (n.endswith(".dylib") or 'igamegod' in low or 'check0ver' in low or 'checkover' in low):
             continue
         with open(p, 'rb') as f:
             data = f.read()
@@ -792,6 +810,12 @@ for root, _, names in os.walk(app):
             if pat in new:
                 new = bytearray(bytes(new).replace(pat, rep20))
                 patched += 1
+        for variant in NAME_VARIANTS:
+            for enc in ('utf-8', 'utf-16-le'):
+                o, r = same_len(variant, title, enc)
+                if o in new:
+                    new = bytearray(bytes(new).replace(o, r))
+                    patched += 1
         for m in set(B64.findall(data)):
             try:
                 orig = base64.b64decode(m)
