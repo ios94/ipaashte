@@ -418,6 +418,23 @@ static void scrubLayer(CALayer *layer) {
     }
 }
 
+static BOOL isIOSGodsNoticeText(NSString *s) {
+    if (!s || s.length == 0) return NO;
+    NSArray<NSString *> *keys = @[
+        @"You must login",
+        @"official topic",
+        @"to activate this cheat",
+        @"Cheats by",
+        @"Hacks by"
+    ];
+    for (NSString *k in keys) {
+        if ([s rangeOfString:k options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static void scrubViewHierarchy(UIView *view) {
     if (!view || view.hidden) return;
 
@@ -468,6 +485,32 @@ static void scrubViewHierarchy(UIView *view) {
     if ([view isKindOfClass:[UISwitch class]]) {
         UISwitch *sw = (UISwitch *)view;
         sw.onTintColor = [UIColor colorWithRed:${R_FLT} green:${G_FLT} blue:${B_FLT} alpha:1.0];
+    }
+
+    // 2b. Remove the iOSGods notice text and the "More Apps & Hacks" button (keep "Thank you!")
+    if ([view isKindOfClass:[UIButton class]]) {
+        NSString *bt = extractViewText(view);
+        if (bt && [bt rangeOfString:@"More Apps" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            view.hidden = YES;
+            view.alpha = 0.0;
+            view.userInteractionEnabled = NO;
+            [view removeFromSuperview];
+            return;
+        }
+    }
+    if ([view isKindOfClass:[UILabel class]] || [view isKindOfClass:[UITextView class]]) {
+        if (isIOSGodsNoticeText(extractViewText(view))) {
+            if ([view isKindOfClass:[UILabel class]]) {
+                ((UILabel *)view).text = @"";
+                ((UILabel *)view).attributedText = nil;
+            } else {
+                ((UITextView *)view).text = @"";
+                ((UITextView *)view).attributedText = nil;
+            }
+            view.hidden = YES;
+            view.alpha = 0.0;
+            return;
+        }
     }
 
     // 3. Change Labels ("Made for iOSGods.com" -> Ashte Mod)
