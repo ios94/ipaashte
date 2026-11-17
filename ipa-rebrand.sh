@@ -24,7 +24,7 @@ if [[ -n "$IPA_LINK" ]]; then
   echo "== Single IPA mode: tag=$FROM_TAG file=$LINK_FILE"
 fi
 NEW_LOGO="${NEW_LOGO:-logo.png}"
-MENU_TITLE="${MENU_TITLE:-AshteMobile}"
+MENU_TITLE="${MENU_TITLE:-Ashte Mod}"
 MENU_ICON="${MENU_ICON:-menu_icon.png}"
 MENU_COLOR_HEX="${MENU_COLOR_HEX:-1E64E8}"
 TELEGRAM_URL="${TELEGRAM_URL:-https://t.me/ashtemobile}"
@@ -66,23 +66,11 @@ PY
 cat > "$WORK/ashte_hook.m" <<EOF
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
-#import <SafariServices/SafariServices.h>
 #import <objc/runtime.h>
 
 static NSString *const kNewTitle = @"${MENU_TITLE}";
 static NSString *const kTelegramURL = @"${TELEGRAM_URL}";
 static NSHashTable<UIWindow *> *gKnownWindows = nil;
-static const void *kRedirectedKey = &kRedirectedKey;
-
-// Any Twitter / X / iOSGods / Facebook / YouTube link from the mod menu
-static BOOL isSocialURL(NSURL *url) {
-    if (!url) return NO;
-    NSString *host = url.host.lowercaseString ?: @"";
-    NSString *s = url.absoluteString.lowercaseString ?: @"";
-    if ([s containsString:@"iosgods"] || [s containsString:@"twitter"] ||
-        [s containsString:@"facebook"] || [s containsString:@"youtube"]) return YES;
-    return [host isEqualToString:@"x.com"] || [host hasSuffix:@".x.com"] || [host isEqualToString:@"t.co"];
-}
 
 static UIImage *getCustomMenuIcon(void) {
     static UIImage *cachedIcon = nil;
@@ -277,7 +265,8 @@ static void openTelegramChannel(void) {
 // Redirect any external social/mod URL to Telegram
 static void (*orig_openURL_opts)(id, SEL, NSURL *, NSDictionary *, void (^)(BOOL)) = NULL;
 static void hooked_openURL_opts(id self, SEL _cmd, NSURL *url, NSDictionary *options, void (^completion)(BOOL)) {
-    if (isSocialURL(url)) {
+    NSString *s = url.absoluteString.lowercaseString ?: @"";
+    if ([s containsString:@"iosgods"] || [s containsString:@"twitter"] || [s containsString:@"x.com"] || [s containsString:@"facebook"] || [s containsString:@"youtube"]) {
         url = [NSURL URLWithString:kTelegramURL];
     }
     orig_openURL_opts(self, _cmd, url, options, completion);
@@ -285,59 +274,43 @@ static void hooked_openURL_opts(id self, SEL _cmd, NSURL *url, NSDictionary *opt
 
 static BOOL (*orig_openURL)(id, SEL, NSURL *) = NULL;
 static BOOL hooked_openURL(id self, SEL _cmd, NSURL *url) {
-    if (isSocialURL(url)) {
+    NSString *s = url.absoluteString.lowercaseString ?: @"";
+    if ([s containsString:@"iosgods"] || [s containsString:@"twitter"] || [s containsString:@"x.com"] || [s containsString:@"facebook"] || [s containsString:@"youtube"]) {
         url = [NSURL URLWithString:kTelegramURL];
     }
     return orig_openURL(self, _cmd, url);
 }
 
-// Sign-in sessions (ASWebAuthenticationSession / SFAuthenticationSession) that point to Telegram or a social site
-// show the "Wants to Use t.me to Sign In" prompt. Skip them and open the Telegram app directly.
-static BOOL isTelegramURL(NSURL *url) {
-    NSString *host = url.host.lowercaseString ?: @"";
-    return [host isEqualToString:@"t.me"] || [host isEqualToString:@"telegram.me"] || [host isEqualToString:@"telegram.org"];
+// Heart button: it starts a web sign-in session (x.com). Skip it and open Telegram directly.
+static const void *kSkipSessionKey = &kSkipSessionKey;
+static BOOL isHeartLink(NSURL *url) {
+    NSString *s = url.absoluteString.lowercaseString ?: @"";
+    return [s containsString:@"iosgods"] || [s containsString:@"twitter"] || [s containsString:@"x.com"] ||
+           [s containsString:@"facebook"] || [s containsString:@"youtube"] || [s containsString:@"t.me"];
 }
 
 static id (*orig_asInit)(id, SEL, NSURL *, NSString *, id) = NULL;
 static id hooked_asInit(id self, SEL _cmd, NSURL *url, NSString *scheme, id handler) {
     id obj = orig_asInit(self, _cmd, url, scheme, handler);
-    if (obj && (isSocialURL(url) || isTelegramURL(url))) objc_setAssociatedObject(obj, kRedirectedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (obj && isHeartLink(url)) objc_setAssociatedObject(obj, kSkipSessionKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return obj;
 }
 static BOOL (*orig_asStart)(id, SEL) = NULL;
 static BOOL hooked_asStart(id self, SEL _cmd) {
-    if (objc_getAssociatedObject(self, kRedirectedKey)) { openTelegramChannel(); return YES; }
+    if (objc_getAssociatedObject(self, kSkipSessionKey)) { openTelegramChannel(); return YES; }
     return orig_asStart(self, _cmd);
 }
 
 static id (*orig_sfaInit)(id, SEL, NSURL *, NSString *, id) = NULL;
 static id hooked_sfaInit(id self, SEL _cmd, NSURL *url, NSString *scheme, id handler) {
     id obj = orig_sfaInit(self, _cmd, url, scheme, handler);
-    if (obj && (isSocialURL(url) || isTelegramURL(url))) objc_setAssociatedObject(obj, kRedirectedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (obj && isHeartLink(url)) objc_setAssociatedObject(obj, kSkipSessionKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return obj;
 }
 static BOOL (*orig_sfaStart)(id, SEL) = NULL;
 static BOOL hooked_sfaStart(id self, SEL _cmd) {
-    if (objc_getAssociatedObject(self, kRedirectedKey)) { openTelegramChannel(); return YES; }
+    if (objc_getAssociatedObject(self, kSkipSessionKey)) { openTelegramChannel(); return YES; }
     return orig_sfaStart(self, _cmd);
-}
-
-// The heart button opens x.com inside an in-app Safari view (SFSafariViewController).
-// Mark it when it is created with a social URL, and swap the URL to Telegram.
-static id (*orig_sfInitCfg)(id, SEL, NSURL *, SFSafariViewControllerConfiguration *) = NULL;
-static id hooked_sfInitCfg(id self, SEL _cmd, NSURL *url, SFSafariViewControllerConfiguration *cfg) {
-    BOOL social = isSocialURL(url);
-    id obj = orig_sfInitCfg(self, _cmd, social ? [NSURL URLWithString:kTelegramURL] : url, cfg);
-    if (social && obj) objc_setAssociatedObject(obj, kRedirectedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return obj;
-}
-
-static id (*orig_sfInitReader)(id, SEL, NSURL *, BOOL) = NULL;
-static id hooked_sfInitReader(id self, SEL _cmd, NSURL *url, BOOL reader) {
-    BOOL social = isSocialURL(url);
-    id obj = orig_sfInitReader(self, _cmd, social ? [NSURL URLWithString:kTelegramURL] : url, reader);
-    if (social && obj) objc_setAssociatedObject(obj, kRedirectedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return obj;
 }
 
 // Hook UIViewController viewDidAppear: to immediately dismiss any "Join ViP" modal VC
@@ -357,13 +330,6 @@ static void (*orig_presentVC)(id, SEL, UIViewController *, BOOL, void (^)(void))
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *vcToPresent, BOOL flag, void (^completion)(void)) {
     if (!vcToPresent) {
         orig_presentVC(self, _cmd, vcToPresent, flag, completion);
-        return;
-    }
-
-    if ([vcToPresent isKindOfClass:[SFSafariViewController class]] &&
-        objc_getAssociatedObject(vcToPresent, kRedirectedKey)) {
-        openTelegramChannel();
-        if (completion) completion();
         return;
     }
 
@@ -669,17 +635,6 @@ static void initAshteHook(void) {
             method_setImplementation(mMoveWin, (IMP)hooked_didMoveToWindow);
         }
 
-        Method mSfCfg = class_getInstanceMethod([SFSafariViewController class], @selector(initWithURL:configuration:));
-        if (mSfCfg) {
-            orig_sfInitCfg = (void *)method_getImplementation(mSfCfg);
-            method_setImplementation(mSfCfg, (IMP)hooked_sfInitCfg);
-        }
-        Method mSfRd = class_getInstanceMethod([SFSafariViewController class], @selector(initWithURL:entersReaderIfAvailable:));
-        if (mSfRd) {
-            orig_sfInitReader = (void *)method_getImplementation(mSfRd);
-            method_setImplementation(mSfRd, (IMP)hooked_sfInitReader);
-        }
-
         SEL selAuthInit = NSSelectorFromString(@"initWithURL:callbackURLScheme:completionHandler:");
         SEL selStart = NSSelectorFromString(@"start");
         Class asCls = NSClassFromString(@"ASWebAuthenticationSession");
@@ -725,7 +680,7 @@ xcrun --sdk iphoneos clang -arch arm64 -dynamiclib \
   -isysroot "$SDK_PATH" \
   -miphoneos-version-min=12.0 \
   -framework UIKit -framework Foundation -framework CoreGraphics \
-  -framework QuartzCore -framework WebKit -framework SafariServices -framework AuthenticationServices \
+  -framework QuartzCore -framework WebKit -framework AuthenticationServices \
   -install_name "@executable_path/Frameworks/libashte.dylib" \
   "$WORK/ashte_hook.m" -o "$WORK/libashte.dylib"
 
