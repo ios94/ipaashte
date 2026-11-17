@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# ipa-rebrand.sh (Clean Syntax - Blue Menu + Custom Logo + Telegram Only Popup)
+# ipa-rebrand.sh (Universal Multi-IPA Edition - Works on ALL iOSGods Games)
 
 set -euo pipefail
 
 REPO="${REPO:-USERNAME/REPO}"
 FROM_TAG="${FROM_TAG:-V.1}"
 TO_TAG="${TO_TAG:-V.5}"
-NEW_NAME="${NEW_NAME:-My App}"
+NEW_NAME="${NEW_NAME:-keep}"
 NEW_LOGO="${NEW_LOGO:-logo.png}"
 MENU_TITLE="${MENU_TITLE:-Ashte Mod}"
 MENU_ICON="${MENU_ICON:-menu_icon.png}"
 MENU_COLOR_HEX="${MENU_COLOR_HEX:-1E64E8}"
 TELEGRAM_URL="${TELEGRAM_URL:-https://t.me/ashtemobile}"
 
-if [[ ! -f "$NEW_LOGO" ]]; then
-  echo "Logo not found: $NEW_LOGO"
-  exit 1
-fi
-
 if [[ ! -f "$MENU_ICON" ]]; then
-  MENU_ICON="$NEW_LOGO"
+  if [[ -f "$NEW_LOGO" ]]; then
+    MENU_ICON="$NEW_LOGO"
+  else
+    echo "Menu icon not found: $MENU_ICON"
+    exit 1
+  fi
 fi
 
 resize() {
@@ -46,7 +46,7 @@ print(f"{r:.4f} {g:.4f} {b:.4f} {r*0.75:.4f} {g*0.75:.4f} {b*0.75:.4f}")
 PY
 )
 
-# 1) Build the Runtime Objective-C Hook Dylib (libashte.dylib)
+# 1) Build the Universal Runtime Objective-C Hook Dylib (libashte.dylib)
 cat > "$WORK/ashte_hook.m" <<EOF
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -64,13 +64,27 @@ static UIImage *getCustomMenuIcon(void) {
     return cachedIcon;
 }
 
+// Universal Red detector (supports RGB, P3, and CGColor spaces across all iOSGods menus)
 static BOOL isMenuRed(UIColor *color, BOOL *isDarkHeader) {
     if (!color) return NO;
     CGFloat r = 0, g = 0, b = 0, a = 0;
     if ([color getRed:&r green:&g blue:&b alpha:&a]) {
-        if (r > 0.60 && g < 0.38 && b < 0.38 && a > 0.2) {
+        if (r > 0.58 && g < 0.40 && b < 0.40 && a > 0.15) {
             if (isDarkHeader) *isDarkHeader = (r < 0.82);
             return YES;
+        }
+    }
+    CGColorRef cg = color.CGColor;
+    if (cg) {
+        size_t n = CGColorGetNumberOfComponents(cg);
+        const CGFloat *c = CGColorGetComponents(cg);
+        if (c && n >= 3) {
+            r = c[0]; g = c[1]; b = c[2];
+            a = (n >= 4) ? c[3] : 1.0;
+            if (r > 0.58 && g < 0.40 && b < 0.40 && a > 0.15) {
+                if (isDarkHeader) *isDarkHeader = (r < 0.82);
+                return YES;
+            }
         }
     }
     return NO;
@@ -129,6 +143,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *vcToPresent, B
             if ([at rangeOfString:@"Twitter" options:NSCaseInsensitiveSearch].location != NSNotFound ||
                 [at rangeOfString:@"iOSGods" options:NSCaseInsensitiveSearch].location != NSNotFound ||
                 [at rangeOfString:@"Credit" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                [at rangeOfString:@"Thank" options:NSCaseInsensitiveSearch].location != NSNotFound ||
                 [at rangeOfString:kNewTitle options:NSCaseInsensitiveSearch].location != NSNotFound) {
                 isModPopup = YES;
                 break;
@@ -154,10 +169,43 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *vcToPresent, B
     orig_presentVC(self, _cmd, vcToPresent, flag, completion);
 }
 
+static void scrubLayer(CALayer *layer) {
+    if (!layer) return;
+    BOOL isHeader = NO;
+    if (layer.backgroundColor) {
+        UIColor *c = [UIColor colorWithCGColor:layer.backgroundColor];
+        if (isMenuRed(c, &isHeader)) {
+            CGFloat a = CGColorGetAlpha(layer.backgroundColor);
+            UIColor *nb = isHeader
+                ? [UIColor colorWithRed:${HR_FLT} green:${HG_FLT} blue:${HB_FLT} alpha:a]
+                : [UIColor colorWithRed:${R_FLT} green:${G_FLT} blue:${B_FLT} alpha:a];
+            layer.backgroundColor = nb.CGColor;
+        }
+    }
+    if (layer.borderColor) {
+        UIColor *c = [UIColor colorWithCGColor:layer.borderColor];
+        if (isMenuRed(c, NULL)) {
+            layer.borderColor = [UIColor colorWithRed:${R_FLT} green:${G_FLT} blue:${B_FLT} alpha:1.0].CGColor;
+        }
+    }
+    if ([layer isKindOfClass:[CAShapeLayer class]]) {
+        CAShapeLayer *sl = (CAShapeLayer *)layer;
+        if (sl.fillColor && isMenuRed([UIColor colorWithCGColor:sl.fillColor], &isHeader)) {
+            sl.fillColor = [UIColor colorWithRed:${R_FLT} green:${G_FLT} blue:${B_FLT} alpha:1.0].CGColor;
+        }
+        if (sl.strokeColor && isMenuRed([UIColor colorWithCGColor:sl.strokeColor], &isHeader)) {
+            sl.strokeColor = [UIColor colorWithRed:${HR_FLT} green:${HG_FLT} blue:${HB_FLT} alpha:1.0].CGColor;
+        }
+    }
+    for (CALayer *sub in [layer.sublayers copy]) {
+        scrubLayer(sub);
+    }
+}
+
 static void scrubViewHierarchy(UIView *view) {
     if (!view) return;
 
-    // 1. Change Red menu background & slider tracks to Blue
+    // 1. Change Red menu background, switch buttons & layers to Blue
     BOOL isHeader = NO;
     if (isMenuRed(view.backgroundColor, &isHeader)) {
         CGFloat alpha = CGColorGetAlpha(view.backgroundColor.CGColor);
@@ -167,15 +215,20 @@ static void scrubViewHierarchy(UIView *view) {
             view.backgroundColor = [UIColor colorWithRed:${R_FLT} green:${G_FLT} blue:${B_FLT} alpha:alpha];
         }
     }
-    if (view.layer.borderColor && isMenuRed([UIColor colorWithCGColor:view.layer.borderColor], NULL)) {
-        view.layer.borderColor = [UIColor colorWithRed:${R_FLT} green:${G_FLT} blue:${B_FLT} alpha:1.0].CGColor;
+    if (isMenuRed(view.tintColor, NULL)) {
+        view.tintColor = [UIColor colorWithRed:${R_FLT} green:${G_FLT} blue:${B_FLT} alpha:1.0];
     }
+    scrubLayer(view.layer);
 
-    // 2. Change UISlider red tint & thumb to Blue
+    // 2. Change UISlider & UISwitch red tints to Blue
     if ([view isKindOfClass:[UISlider class]]) {
         UISlider *slider = (UISlider *)view;
         slider.minimumTrackTintColor = [UIColor colorWithRed:${HR_FLT} green:${HG_FLT} blue:${HB_FLT} alpha:1.0];
         slider.thumbTintColor = [UIColor colorWithRed:${R_FLT} green:${G_FLT} blue:${B_FLT} alpha:1.0];
+    }
+    if ([view isKindOfClass:[UISwitch class]]) {
+        UISwitch *sw = (UISwitch *)view;
+        sw.onTintColor = [UIColor colorWithRed:${R_FLT} green:${G_FLT} blue:${B_FLT} alpha:1.0];
     }
 
     // 3. Change Labels ("Made for iOSGods.com" -> Ashte Mod)
@@ -192,11 +245,11 @@ static void scrubViewHierarchy(UIView *view) {
         }
     }
 
-    // 4. Replace skull/mascot icon in menu header & floating button with custom logo
+    // 4. Replace mascot/avatar icon in menu header & floating button with custom logo
     UIImage *customImg = getCustomMenuIcon();
     if (customImg && view.tag != 994411) {
         CGSize sz = view.bounds.size;
-        if (sz.width >= 20 && sz.width <= 95 && sz.height >= 20 && sz.height <= 95 && fabs(sz.width - sz.height) <= 15) {
+        if (sz.width >= 20 && sz.width <= 105 && sz.height >= 20 && sz.height <= 105 && fabs(sz.width - sz.height) <= 18) {
             if ([view isKindOfClass:[UIImageView class]]) {
                 UIImageView *iv = (UIImageView *)view;
                 if (iv.image && iv.frame.origin.x < 120) {
@@ -218,9 +271,25 @@ static void scrubViewHierarchy(UIView *view) {
         }
     }
 
-    for (UIView *sub in view.subviews) {
+    for (UIView *sub in [view.subviews copy]) {
         scrubViewHierarchy(sub);
     }
+}
+
+static NSArray<UIWindow *> *getAllWindows(void) {
+    NSMutableSet *set = [NSMutableSet set];
+    UIApplication *app = [UIApplication sharedApplication];
+    if (app.windows) [set addObjectsFromArray:app.windows];
+    if (app.keyWindow) [set addObject:app.keyWindow];
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in app.connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)scene;
+                if (ws.windows) [set addObjectsFromArray:ws.windows];
+            }
+        }
+    }
+    return [set allObjects];
 }
 
 __attribute__((constructor))
@@ -244,7 +313,7 @@ static void initAshteHook(void) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [NSTimer scheduledTimerWithTimeInterval:0.12 repeats:YES block:^(NSTimer * _Nonnull timer) {
-            for (UIWindow *win in [UIApplication sharedApplication].windows) {
+            for (UIWindow *win in getAllWindows()) {
                 scrubViewHierarchy(win);
             }
         }];
@@ -252,30 +321,32 @@ static void initAshteHook(void) {
 }
 EOF
 
-echo "== Compiling iOS ARM64 Runtime Hook (libashte.dylib)"
+echo "== Compiling Universal iOS ARM64 Hook (libashte.dylib)"
 SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
 xcrun --sdk iphoneos clang -arch arm64 -dynamiclib \
   -isysroot "$SDK_PATH" \
   -miphoneos-version-min=12.0 \
   -framework UIKit -framework Foundation -framework CoreGraphics \
   -framework QuartzCore \
-  -install_name "@rpath/libashte.dylib" \
+  -install_name "@executable_path/libashte.dylib" \
   "$WORK/ashte_hook.m" -o "$WORK/libashte.dylib"
 
-echo "== Downloading IPAs from $FROM_TAG"
+echo "== Downloading ALL IPAs from $FROM_TAG"
 gh release download "$FROM_TAG" -R "$REPO" -p "*.ipa" -D "$WORK/in"
 
 for ipa in "$WORK"/in/*.ipa; do
   fname="$(basename "$ipa")"
-  echo "== Processing $fname"
+  echo "=========================================="
+  echo "== Processing: $fname"
   T="$WORK/tmp"
   rm -rf "$T"
   mkdir -p "$T"
   unzip -q "$ipa" -d "$T"
   APP="$(ls -d "$T"/Payload/*.app | head -n1)"
 
-  # 1) Update App Name in Info.plist
-  python3 - "$APP/Info.plist" "$NEW_NAME" <<'PY'
+  # 1) Keep original game name unless user explicitly typed a custom name
+  if [[ -n "$NEW_NAME" && "$NEW_NAME" != "My App" && "$NEW_NAME" != "keep" ]]; then
+    python3 - "$APP/Info.plist" "$NEW_NAME" <<'PY'
 import plistlib, sys
 path, name = sys.argv[1:3]
 with open(path, 'rb') as f:
@@ -287,25 +358,16 @@ d['CFBundleName'] = name
 with open(path, 'wb') as f:
     plistlib.dump(d, f, fmt=plistlib.FMT_BINARY if is_bin else plistlib.FMT_XML)
 PY
+  fi
 
-  # 2) Replace App Icons
-  while IFS= read -r -d '' f; do
-    read -r w h < <(python3 -c "
-import struct, sys
-b = open(sys.argv[1], 'rb').read(64)
-i = b.find(b'IHDR')
-print(*(struct.unpack('>II', b[i+4:i+12]) if i >= 0 else (180, 180)))
-" "$f")
-    resize "$NEW_LOGO" "$w" "$h" "$f.new" && mv "$f.new" "$f"
-  done < <(find "$APP" -maxdepth 1 -type f \( -iname "AppIcon*.png" -o -iname "Icon*.png" \) -print0)
-
-  # 3) Patch embedded base64 icons inside mod menu dylib
-  python3 - "$APP" "$MENU_ICON" <<'PY'
+  # 2) Patch embedded base64 icons & plain text titles inside ANY dylib in the entire app
+  python3 - "$APP" "$MENU_ICON" "$MENU_TITLE" <<'PY'
 import sys, os, re, io, base64, struct, zlib
 from PIL import Image
 
-app, icon_path = sys.argv[1:3]
+app, icon_path, title = sys.argv[1:4]
 B64 = re.compile(rb'iVBORw0KGgo[A-Za-z0-9+/]{80,}={0,2}')
+MACHO = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca')
 
 def chunk(t, d):
     return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
@@ -344,15 +406,25 @@ def make_png(target, w, h):
             return None
         s *= 0.85
 
-for root, _, names in os.walk(os.path.join(app, "Frameworks")):
+rep20 = title.encode('utf-8')[:20].ljust(20, b' ')
+
+for root, _, names in os.walk(app):
     for n in names:
-        if not n.endswith(".dylib"):
-            continue
         p = os.path.join(root, n)
+        if os.path.islink(p) or not os.path.isfile(p):
+            continue
+        if not (n.endswith(".dylib") or 'igamegod' in n.lower()):
+            continue
         with open(p, 'rb') as f:
             data = f.read()
+        if data[:4] not in MACHO:
+            continue
         new = bytearray(data)
         patched = 0
+        for pat in (b"Made for iOSGods.com", b"made for iosgods.com"):
+            if pat in new:
+                new = bytearray(bytes(new).replace(pat, rep20))
+                patched += 1
         for m in set(B64.findall(data)):
             try:
                 orig = base64.b64decode(m)
@@ -366,46 +438,55 @@ for root, _, names in os.walk(os.path.join(app, "Frameworks")):
                     if len(nb) == len(m):
                         new = bytearray(bytes(new).replace(m, nb))
                         patched += 1
-        if patched > 0:
+        if bytes(new) != data:
             with open(p, 'wb') as f:
                 f.write(bytes(new))
-            print(f"  Patched {patched} embedded base64 icon(s) in {n}")
+            print(f"  Binary-patched {patched} item(s) in {os.path.relpath(p, app)}")
 PY
 
-  # 4) Copy custom menu icon & libashte.dylib into Frameworks
+  # 3) Place libashte.dylib in BOTH app root (@executable_path) and Frameworks/ (@rpath)
+  cp "$WORK/libashte.dylib" "$APP/libashte.dylib"
   mkdir -p "$APP/Frameworks"
   cp "$WORK/libashte.dylib" "$APP/Frameworks/libashte.dylib"
   resize "$MENU_ICON" 120 120 "$APP/ashte_menu_icon.png"
 
-  # 5) Inject Load Command into the mod menu dylib using LIEF
+  # 4) Universal Injection: Inject into ALL mod dylibs + Main Executable so it ALWAYS loads!
   python3 - "$APP" <<'PY'
 import os, sys, plistlib, lief
 
 app = sys.argv[1]
-target_bin = None
+with open(os.path.join(app, "Info.plist"), "rb") as f:
+    main_exe = plistlib.load(f).get("CFBundleExecutable", "")
 
-for root, _, names in os.walk(os.path.join(app, "Frameworks")):
+targets = []
+# Find all non-substrate dylibs anywhere inside the .app bundle
+for root, _, names in os.walk(app):
     for n in names:
-        if n.endswith(".dylib") and n != "libashte.dylib":
-            target_bin = os.path.join(root, n)
-            break
+        if n.endswith(".dylib") and n not in ("libashte.dylib", "CydiaSubstrate.dylib", "libsubstitute.dylib"):
+            targets.append(os.path.join(root, n))
 
-if not target_bin:
-    with open(os.path.join(app, "Info.plist"), "rb") as f:
-        exe = plistlib.load(f).get("CFBundleExecutable", "")
-    target_bin = os.path.join(app, exe)
+# Also include the main executable if no custom dylib was found
+main_path = os.path.join(app, main_exe)
+if not targets and os.path.isfile(main_path):
+    targets.append(main_path)
 
-print(f"  Injecting @rpath/libashte.dylib into {os.path.relpath(target_bin, app)}")
-binary = lief.parse(target_bin)
-binary.add_library("@rpath/libashte.dylib")
-binary.write(target_bin)
+for t in targets:
+    rel = os.path.relpath(t, app)
+    try:
+        b = lief.parse(t)
+        if b:
+            b.add_library("@executable_path/libashte.dylib")
+            b.write(t)
+            print(f"  Injected @executable_path/libashte.dylib -> {rel}")
+    except Exception as e:
+        print(f"  Skipped {rel}: {e}")
 PY
 
-  # 6) Re-pack IPA
+  # 5) Re-pack IPA with its original filename
   (cd "$T" && zip -qry "$WORK/out/$fname" Payload)
 done
 
-echo "== Uploading to $TO_TAG"
+echo "== Uploading all rebranded IPAs to $TO_TAG"
 gh release view "$TO_TAG" -R "$REPO" >/dev/null 2>&1 || \
   gh release create "$TO_TAG" -R "$REPO" -t "$TO_TAG" -n "Rebranded IPAs"
 gh release upload "$TO_TAG" "$WORK"/out/*.ipa -R "$REPO" --clobber
