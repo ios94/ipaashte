@@ -7,18 +7,6 @@ on:
         description: "New app name (leave as 'keep' to keep each game's original name)"
         required: true
         default: "keep"
-      ipa_link:
-        description: "Link of ONE IPA to process (leave empty to use 'game' below)"
-        required: false
-        default: ""
-      game:
-        description: "Game to process: 'all' or part of the IPA file name (e.g. Subway)"
-        required: true
-        default: "all"
-      skip_existing:
-        description: "When game=all: skip IPAs already in the target release (true/false)"
-        required: true
-        default: "true"
       menu_title:
         description: "Mod menu title"
         required: true
@@ -31,6 +19,10 @@ on:
         description: "Release to upload new IPAs to"
         required: true
         default: "V.5"
+      telegram_url:
+        description: "Your Telegram link (heart button opens this)"
+        required: true
+        default: "https://t.me/ashtemobile"
       menu_color_hex:
         description: "New menu color in HEX (Blue default: 1E64E8)"
         required: true
@@ -56,13 +48,11 @@ jobs:
           FROM_TAG: ${{ inputs.from_tag }}
           TO_TAG: ${{ inputs.to_tag }}
           NEW_NAME: ${{ inputs.app_name }}
-          GAME: ${{ inputs.game }}
-          IPA_LINK: ${{ inputs.ipa_link }}
-          SKIP_EXISTING: ${{ inputs.skip_existing }}
           NEW_LOGO: logo.png
           MENU_ICON: menu_icon.png
           MENU_TITLE: ${{ inputs.menu_title }}
           MENU_COLOR_HEX: ${{ inputs.menu_color_hex }}
+          TELEGRAM_URL: ${{ inputs.telegram_url }}
         run: |
           chmod +x ipa-rebrand.sh
           ./ipa-rebrand.sh
