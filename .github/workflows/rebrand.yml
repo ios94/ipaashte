@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       app_name:
-        description: "New app name"
+        description: "New app name (leave as 'keep' to keep each game's original name)"
         required: true
-        default: "CrashArenaTurboStars"
+        default: "keep"
       menu_title:
         description: "Mod menu title"
         required: true
