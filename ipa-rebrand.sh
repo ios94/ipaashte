@@ -451,6 +451,91 @@ static void scrubLayer(CALayer *layer) {
     }
 }
 
+// ---- Blue menu recolor (only inside the menu box) ----
+static BOOL isMenuBlue(UIColor *color, BOOL *isDark) {
+    if (!color) return NO;
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if (![color getRed:&r green:&g blue:&b alpha:&a]) {
+        CGColorRef cg = color.CGColor;
+        size_t n = CGColorGetNumberOfComponents(cg);
+        const CGFloat *c = CGColorGetComponents(cg);
+        if (!c || n < 3) return NO;
+        r = c[0]; g = c[1]; b = c[2];
+        a = (n >= 4) ? c[3] : 1.0;
+    }
+    if (a > 0.15 && b > 0.35 && b > r + 0.20 && b >= g) {
+        if (isDark) *isDark = (b < 0.75);
+        return YES;
+    }
+    return NO;
+}
+
+static UIColor *ashteBlueRepl(BOOL dark, CGFloat a) {
+    return dark
+        ? [UIColor colorWithRed:${HR_FLT} green:${HG_FLT} blue:${HB_FLT} alpha:a]
+        : [UIColor colorWithRed:${R_FLT} green:${G_FLT} blue:${B_FLT} alpha:a];
+}
+
+static void recolorBlueLayer(CALayer *layer) {
+    if (!layer) return;
+    BOOL d = NO;
+    if (layer.backgroundColor) {
+        UIColor *c = [UIColor colorWithCGColor:layer.backgroundColor];
+        if (isMenuBlue(c, &d)) {
+            layer.backgroundColor = ashteBlueRepl(d, CGColorGetAlpha(layer.backgroundColor)).CGColor;
+        }
+    }
+    if ([layer isKindOfClass:[CAGradientLayer class]]) {
+        CAGradientLayer *gl = (CAGradientLayer *)layer;
+        NSMutableArray *arr = [NSMutableArray array];
+        BOOL changed = NO;
+        for (id col in gl.colors) {
+            CGColorRef cg = (__bridge CGColorRef)col;
+            if (isMenuBlue([UIColor colorWithCGColor:cg], &d)) {
+                [arr addObject:(id)ashteBlueRepl(d, CGColorGetAlpha(cg)).CGColor];
+                changed = YES;
+            } else {
+                [arr addObject:col];
+            }
+        }
+        if (changed) gl.colors = arr;
+    }
+    if ([layer isKindOfClass:[CAShapeLayer class]]) {
+        CAShapeLayer *sl = (CAShapeLayer *)layer;
+        if (sl.fillColor && isMenuBlue([UIColor colorWithCGColor:sl.fillColor], &d)) {
+            sl.fillColor = ashteBlueRepl(d, 1.0).CGColor;
+        }
+    }
+    for (CALayer *sub in [layer.sublayers copy]) recolorBlueLayer(sub);
+}
+
+static void recolorBlueView(UIView *v) {
+    if (!v) return;
+    BOOL d = NO;
+    if (isMenuBlue(v.backgroundColor, &d)) {
+        v.backgroundColor = ashteBlueRepl(d, CGColorGetAlpha(v.backgroundColor.CGColor));
+    }
+    if (isMenuBlue(v.tintColor, &d)) v.tintColor = ashteBlueRepl(NO, 1.0);
+    recolorBlueLayer(v.layer);
+    for (UIView *sub in [v.subviews copy]) recolorBlueView(sub);
+}
+
+// Finds the menu box (smaller than the screen) that contains the title label
+static UIView *findMenuRoot(UIView *label) {
+    UIWindow *win = label.window;
+    if (!win) return nil;
+    CGSize ws = win.bounds.size;
+    UIView *best = nil;
+    UIView *p = label.superview;
+    while (p && p != win) {
+        CGSize s = p.bounds.size;
+        if (s.width < ws.width * 0.92 && s.height < ws.height * 0.92) best = p;
+        else break;
+        p = p.superview;
+    }
+    return best;
+}
+
 static BOOL isIOSGodsNoticeText(NSString *s) {
     if (!s || s.length == 0) return NO;
     NSArray<NSString *> *keys = @[
@@ -560,6 +645,16 @@ static void scrubViewHierarchy(UIView *view) {
                        [txt rangeOfString:@"Made for" options:NSCaseInsensitiveSearch].location != NSNotFound) {
                 lbl.text = kNewTitle;
             }
+        }
+    }
+
+    // 3b. Recolor the blue menu (only inside the menu box)
+    if ([view isKindOfClass:[UILabel class]]) {
+        NSString *tt = ((UILabel *)view).text;
+        tt = [tt stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (tt && [tt isEqualToString:kNewTitle]) {
+            UIView *root = findMenuRoot(view);
+            if (root) recolorBlueView(root);
         }
     }
 
