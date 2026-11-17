@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ipa-rebrand.sh (Universal Multi-IPA Edition - Works on ALL iOSGods Games)
+# ipa-rebrand.sh (Universal Multi-IPA Edition + ViP Popup Blocker)
 
 set -euo pipefail
 
@@ -46,13 +46,16 @@ print(f"{r:.4f} {g:.4f} {b:.4f} {r*0.75:.4f} {g*0.75:.4f} {b*0.75:.4f}")
 PY
 )
 
+SAFE_TITLE=$(python3 -c 'import sys; print(sys.argv[1].replace("\\", "\\\\").replace("\"", "\\\""))' "$MENU_TITLE")
+SAFE_URL=$(python3 -c 'import sys; print(sys.argv[1].replace("\\", "\\\\").replace("\"", "\\\""))' "$TELEGRAM_URL")
+
 # 1) Build the Universal Runtime Objective-C Hook Dylib (libashte.dylib)
 cat > "$WORK/ashte_hook.m" <<EOF
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-static NSString *const kNewTitle = @"${MENU_TITLE}";
-static NSString *const kTelegramURL = @"${TELEGRAM_URL}";
+static NSString *const kNewTitle = @"${SAFE_TITLE}";
+static NSString *const kTelegramURL = @"${SAFE_URL}";
 
 static UIImage *getCustomMenuIcon(void) {
     static UIImage *cachedIcon = nil;
@@ -64,7 +67,6 @@ static UIImage *getCustomMenuIcon(void) {
     return cachedIcon;
 }
 
-// Universal Red detector (supports RGB, P3, and CGColor spaces across all iOSGods menus)
 static BOOL isMenuRed(UIColor *color, BOOL *isDarkHeader) {
     if (!color) return NO;
     CGFloat r = 0, g = 0, b = 0, a = 0;
@@ -90,6 +92,59 @@ static BOOL isMenuRed(UIColor *color, BOOL *isDarkHeader) {
     return NO;
 }
 
+// پشکنەر بۆ دۆزینەوەی پەنجەرەی Join ViP لەناو هەر Viewـێکدا
+static BOOL containsViPPopupContent(UIView *view) {
+    if (!view) return NO;
+    NSString *cls = NSStringFromClass([view class]);
+    if ([cls rangeOfString:@"IGG" options:NSCaseInsensitiveSearch].location != NSNotFound &&
+        [cls rangeOfString:@"VIP" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        return YES;
+    }
+    if ([view isKindOfClass:[UILabel class]]) {
+        NSString *t = ((UILabel *)view).text ?: @"";
+        if ([t rangeOfString:@"Join the ViP community" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [t rangeOfString:@"Unlimited Feature Access" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [t rangeOfString:@"ViP purchases are non-refundable" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [t rangeOfString:@"Priority Requests" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+    } else if ([view isKindOfClass:[UIButton class]]) {
+        UIButton *btn = (UIButton *)view;
+        NSString *bt = [btn titleForState:UIControlStateNormal] ?: btn.titleLabel.text ?: @"";
+        if ([bt isEqualToString:@"Maybe Later"] || [bt isEqualToString:@"Join Now!"]) {
+            return YES;
+        }
+    }
+    for (UIView *sub in [view.subviews copy]) {
+        if (containsViPPopupContent(sub)) return YES;
+    }
+    return NO;
+}
+
+static void dismissOrHideViPView(UIView *view) {
+    if (!view) return;
+    UIResponder *resp = view;
+    while (resp) {
+        if ([resp isKindOfClass:[UIViewController class]]) {
+            UIViewController *vc = (UIViewController *)resp;
+            if (vc.presentingViewController) {
+                [vc dismissViewControllerAnimated:NO completion:nil];
+                return;
+            }
+        }
+        resp = [resp nextResponder];
+    }
+    // ئەگەر وەک subview دانرابوو، بیشارەوە و لایببە
+    UIView *target = view;
+    while (target.superview && ![target.superview isKindOfClass:[UIWindow class]]) {
+        target = target.superview;
+    }
+    target.hidden = YES;
+    target.alpha = 0.0;
+    target.userInteractionEnabled = NO;
+    [target removeFromSuperview];
+}
+
 static void openTelegramChannel(void) {
     NSURL *url = [NSURL URLWithString:kTelegramURL];
     if (!url) return;
@@ -106,7 +161,6 @@ static void openTelegramChannel(void) {
     });
 }
 
-// Redirect any external social/mod URL to Telegram
 static void (*orig_openURL_opts)(id, SEL, NSURL *, NSDictionary *, void (^)(BOOL)) = NULL;
 static void hooked_openURL_opts(id self, SEL _cmd, NSURL *url, NSDictionary *options, void (^completion)(BOOL)) {
     NSString *s = url.absoluteString.lowercaseString ?: @"";
@@ -125,9 +179,23 @@ static BOOL hooked_openURL(id self, SEL _cmd, NSURL *url) {
     return orig_openURL(self, _cmd, url);
 }
 
-// Intercept UIAlertController popup and show ONLY "Telegram" + "Dismiss"
+// بلۆککردنی پەنجەرەی ViP پێش ئەوەی بێتە سەر شاشە + گۆڕینی پۆپ-ئەپی سەرەتا
 static void (*orig_presentVC)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *vcToPresent, BOOL flag, void (^completion)(void)) {
+    if (!vcToPresent) {
+        orig_presentVC(self, _cmd, vcToPresent, flag, completion);
+        return;
+    }
+
+    // 1. پشکنین بۆ پەنجەرەی Join ViP و بلۆککردنی دەستبەجێ
+    NSString *vcClass = NSStringFromClass([vcToPresent class]);
+    if ([vcClass rangeOfString:@"VIP" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        containsViPPopupContent(vcToPresent.view)) {
+        if (completion) completion();
+        return; // ڕێگە مەدە پەنجەرەکە پیشان بدرێت
+    }
+
+    // 2. گۆڕینی UIAlertController بۆ تێلێگرام
     if ([vcToPresent isKindOfClass:[UIAlertController class]]) {
         UIAlertController *alert = (UIAlertController *)vcToPresent;
         BOOL isModPopup = NO;
@@ -203,9 +271,20 @@ static void scrubLayer(CALayer *layer) {
 }
 
 static void scrubViewHierarchy(UIView *view) {
-    if (!view) return;
+    if (!view || view.hidden) return;
 
-    // 1. Change Red menu background, switch buttons & layers to Blue
+    // 0. ئەگەر پەنجەرەی Join ViP لەناو شاشەکە دەرکەوت، یەکسەر دایبخە و بیشارەوە
+    if ([view isKindOfClass:[UILabel class]]) {
+        NSString *txt = ((UILabel *)view).text ?: @"";
+        if ([txt rangeOfString:@"Join the ViP community" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [txt rangeOfString:@"Unlimited Feature Access" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [txt rangeOfString:@"ViP purchases are non-refundable" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            dismissOrHideViPView(view);
+            return;
+        }
+    }
+
+    // 1. Change Red menu background, switch buttons & layers to custom color
     BOOL isHeader = NO;
     if (isMenuRed(view.backgroundColor, &isHeader)) {
         CGFloat alpha = CGColorGetAlpha(view.backgroundColor.CGColor);
@@ -220,7 +299,7 @@ static void scrubViewHierarchy(UIView *view) {
     }
     scrubLayer(view.layer);
 
-    // 2. Change UISlider & UISwitch red tints to Blue
+    // 2. Change UISlider & UISwitch red tints
     if ([view isKindOfClass:[UISlider class]]) {
         UISlider *slider = (UISlider *)view;
         slider.minimumTrackTintColor = [UIColor colorWithRed:${HR_FLT} green:${HG_FLT} blue:${HB_FLT} alpha:1.0];
@@ -314,6 +393,10 @@ static void initAshteHook(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [NSTimer scheduledTimerWithTimeInterval:0.12 repeats:YES block:^(NSTimer * _Nonnull timer) {
             for (UIWindow *win in getAllWindows()) {
+                // ئەگەر پەنجەرەیەک تایبەت بوو بە ViP، تەواوی پەنجەرەکە بشارەوە
+                if (containsViPPopupContent(win.rootViewController.presentedViewController.view)) {
+                    [win.rootViewController dismissViewControllerAnimated:NO completion:nil];
+                }
                 scrubViewHierarchy(win);
             }
         }];
@@ -343,6 +426,8 @@ for ipa in "$WORK"/in/*.ipa; do
   mkdir -p "$T"
   unzip -q "$ipa" -d "$T"
   APP="$(ls -d "$T"/Payload/*.app | head -n1)"
+
+  find "$APP" -name "_CodeSignature" -type d -exec rm -rf {} +
 
   # 1) Keep original game name unless user explicitly typed a custom name
   if [[ -n "$NEW_NAME" && "$NEW_NAME" != "My App" && "$NEW_NAME" != "keep" ]]; then
@@ -450,7 +535,7 @@ PY
   cp "$WORK/libashte.dylib" "$APP/Frameworks/libashte.dylib"
   resize "$MENU_ICON" 120 120 "$APP/ashte_menu_icon.png"
 
-  # 4) Universal Injection: Inject into ALL mod dylibs + Main Executable so it ALWAYS loads!
+  # 4) Universal Injection: Inject into ALL mod dylibs + Main Executable
   python3 - "$APP" <<'PY'
 import os, sys, plistlib, lief
 
@@ -459,25 +544,29 @@ with open(os.path.join(app, "Info.plist"), "rb") as f:
     main_exe = plistlib.load(f).get("CFBundleExecutable", "")
 
 targets = []
-# Find all non-substrate dylibs anywhere inside the .app bundle
 for root, _, names in os.walk(app):
     for n in names:
-        if n.endswith(".dylib") and n not in ("libashte.dylib", "CydiaSubstrate.dylib", "libsubstitute.dylib"):
+        if n.endswith(".dylib") and n not in ("libashte.dylib", "CydiaSubstrate.dylib", "libsubstitute.dylib", "libellekit.dylib"):
             targets.append(os.path.join(root, n))
 
-# Also include the main executable if no custom dylib was found
 main_path = os.path.join(app, main_exe)
 if not targets and os.path.isfile(main_path):
     targets.append(main_path)
+
+dylib_ref = "@executable_path/libashte.dylib"
 
 for t in targets:
     rel = os.path.relpath(t, app)
     try:
         b = lief.parse(t)
         if b:
-            b.add_library("@executable_path/libashte.dylib")
+            existing = [lib.name for lib in b.libraries]
+            if dylib_ref in existing:
+                print(f"  Already linked in {rel}")
+                continue
+            b.add_library(dylib_ref)
             b.write(t)
-            print(f"  Injected @executable_path/libashte.dylib -> {rel}")
+            print(f"  Injected {dylib_ref} -> {rel}")
     except Exception as e:
         print(f"  Skipped {rel}: {e}")
 PY
