@@ -19,14 +19,14 @@ on:
         description: "Release to upload new IPAs to"
         required: true
         default: "V.5"
-      ipa_link:
-        description: "OPTIONAL: link of ONE IPA to process (leave empty = all IPAs in from_tag)"
-        required: false
-        default: ""
       menu_color_hex:
         description: "New menu color in HEX (Blue default: 1E64E8)"
         required: true
         default: "1E64E8"
+      menu_modern:
+        description: "Modern rounded menu look (true/false)"
+        required: true
+        default: "true"
 
 permissions:
   contents: write
@@ -52,7 +52,7 @@ jobs:
           MENU_ICON: menu_icon.png
           MENU_TITLE: ${{ inputs.menu_title }}
           MENU_COLOR_HEX: ${{ inputs.menu_color_hex }}
-          IPA_LINK: ${{ inputs.ipa_link }}
+          MENU_MODERN: ${{ inputs.menu_modern }}
         run: |
           chmod +x ipa-rebrand.sh
           ./ipa-rebrand.sh
