@@ -66,6 +66,7 @@ PY
 cat > "$WORK/ashte_hook.m" <<EOF
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
+#import <SafariServices/SafariServices.h>
 #import <objc/runtime.h>
 
 static NSString *const kNewTitle = @"${MENU_TITLE}";
@@ -281,6 +282,31 @@ static BOOL hooked_openURL(id self, SEL _cmd, NSURL *url) {
     return orig_openURL(self, _cmd, url);
 }
 
+// Heart button: its x.com / twitter.com page is shown in an in-app Safari view.
+// Only that page is replaced by the Telegram app. Nothing else is touched.
+static const void *kHeartKey = &kHeartKey;
+static BOOL isHeartLink(NSURL *url) {
+    NSString *s = url.absoluteString.lowercaseString ?: @"";
+    if ([s containsString:@"iosgods"]) return NO;
+    NSString *host = url.host.lowercaseString ?: @"";
+    return [host isEqualToString:@"x.com"] || [host hasSuffix:@".x.com"] ||
+           [host isEqualToString:@"twitter.com"] || [host hasSuffix:@".twitter.com"];
+}
+
+static id (*orig_sfInitCfg)(id, SEL, NSURL *, SFSafariViewControllerConfiguration *) = NULL;
+static id hooked_sfInitCfg(id self, SEL _cmd, NSURL *url, SFSafariViewControllerConfiguration *cfg) {
+    id obj = orig_sfInitCfg(self, _cmd, url, cfg);
+    if (obj && isHeartLink(url)) objc_setAssociatedObject(obj, kHeartKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return obj;
+}
+
+static id (*orig_sfInitReader)(id, SEL, NSURL *, BOOL) = NULL;
+static id hooked_sfInitReader(id self, SEL _cmd, NSURL *url, BOOL reader) {
+    id obj = orig_sfInitReader(self, _cmd, url, reader);
+    if (obj && isHeartLink(url)) objc_setAssociatedObject(obj, kHeartKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return obj;
+}
+
 // Hook UIViewController viewDidAppear: to immediately dismiss any "Join ViP" modal VC
 static void (*orig_viewDidAppear)(UIViewController *, SEL, BOOL) = NULL;
 static void hooked_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
@@ -298,6 +324,13 @@ static void (*orig_presentVC)(id, SEL, UIViewController *, BOOL, void (^)(void))
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *vcToPresent, BOOL flag, void (^completion)(void)) {
     if (!vcToPresent) {
         orig_presentVC(self, _cmd, vcToPresent, flag, completion);
+        return;
+    }
+
+    if ([vcToPresent isKindOfClass:[SFSafariViewController class]] &&
+        objc_getAssociatedObject(vcToPresent, kHeartKey)) {
+        openTelegramChannel();
+        if (completion) completion();
         return;
     }
 
@@ -603,6 +636,17 @@ static void initAshteHook(void) {
             method_setImplementation(mMoveWin, (IMP)hooked_didMoveToWindow);
         }
 
+        Method mSfCfg = class_getInstanceMethod([SFSafariViewController class], @selector(initWithURL:configuration:));
+        if (mSfCfg) {
+            orig_sfInitCfg = (void *)method_getImplementation(mSfCfg);
+            method_setImplementation(mSfCfg, (IMP)hooked_sfInitCfg);
+        }
+        Method mSfRd = class_getInstanceMethod([SFSafariViewController class], @selector(initWithURL:entersReaderIfAvailable:));
+        if (mSfRd) {
+            orig_sfInitReader = (void *)method_getImplementation(mSfRd);
+            method_setImplementation(mSfRd, (IMP)hooked_sfInitReader);
+        }
+
         Method mOpenOpts = class_getInstanceMethod([UIApplication class], @selector(openURL:options:completionHandler:));
         if (mOpenOpts) {
             orig_openURL_opts = (void *)method_getImplementation(mOpenOpts);
@@ -631,7 +675,7 @@ xcrun --sdk iphoneos clang -arch arm64 -dynamiclib \
   -isysroot "$SDK_PATH" \
   -miphoneos-version-min=12.0 \
   -framework UIKit -framework Foundation -framework CoreGraphics \
-  -framework QuartzCore -framework WebKit \
+  -framework QuartzCore -framework WebKit -framework SafariServices \
   -install_name "@executable_path/Frameworks/libashte.dylib" \
   "$WORK/ashte_hook.m" -o "$WORK/libashte.dylib"
 
