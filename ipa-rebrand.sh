@@ -583,36 +583,25 @@ static void ashteStyleTree(UIView *v, UIView *root, BOOL light) {
 
 static void ashteModernize(UIView *root) {
     if (!root) return;
-    if (!gAshteStyled) gAshteStyled = [NSHashTable weakObjectsHashTable];
-    BOOL light = ashteAccentIsLight();
-    CGFloat radius = 20.0;
+    @try {
+        UIWindow *win = root.window;
+        if (!win) return;
+        CGSize ws = win.bounds.size;
+        CGSize rs = root.bounds.size;
+        // Safety: only touch a box that really looks like the menu (not a full-screen container)
+        if (rs.width < 120.0 || rs.height < 80.0) return;
+        if (rs.width > ws.width * 0.92 || rs.height > ws.height * 0.80) return;
 
-    root.layer.cornerRadius = radius;
-    if (@available(iOS 13.0, *)) root.layer.cornerCurve = kCACornerCurveContinuous;
-    root.layer.masksToBounds = YES;
-    root.layer.borderWidth = 1.0;
-    root.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.30].CGColor;
+        if (!gAshteStyled) gAshteStyled = [NSHashTable weakObjectsHashTable];
+        BOOL light = ashteAccentIsLight();
 
-    UIView *host = root.superview;
-    if (host && ![host isKindOfClass:[UIWindow class]]) {
-        host.layer.shadowColor = [UIColor blackColor].CGColor;
-        host.layer.shadowOpacity = 0.35;
-        host.layer.shadowRadius = 18.0;
-        host.layer.shadowOffset = CGSizeMake(0, 8);
-        host.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:root.frame cornerRadius:radius].CGPath;
-    }
+        root.layer.cornerRadius = 18.0;
+        root.layer.masksToBounds = YES;
+        root.layer.borderWidth = 1.0;
+        root.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.30].CGColor;
 
-    ashteStyleTree(root, root, light);
-
-    if (![gAshteStyled containsObject:root]) {
-        [gAshteStyled addObject:root];
-        CGFloat a0 = root.alpha;
-        root.alpha = 0.0;
-        root.transform = CGAffineTransformMakeScale(0.94, 0.94);
-        [UIView animateWithDuration:0.22 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
-            root.alpha = a0;
-            root.transform = CGAffineTransformIdentity;
-        } completion:nil];
+        ashteStyleTree(root, root, light);
+    } @catch (NSException *e) {
     }
 }
 
@@ -733,11 +722,9 @@ static void scrubViewHierarchy(UIView *view) {
         NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
         NSString *tt = [((UILabel *)view).text stringByTrimmingCharactersInSet:ws];
         NSString *nt = [kNewTitle stringByTrimmingCharactersInSet:ws];
-        if (tt.length > 0 && nt.length > 0 &&
-            ([tt caseInsensitiveCompare:nt] == NSOrderedSame ||
-             [tt rangeOfString:nt options:NSCaseInsensitiveSearch].location != NSNotFound)) {
+        if (tt.length > 0 && nt.length > 0 && [tt caseInsensitiveCompare:nt] == NSOrderedSame) {
             UIView *root = findMenuRoot(view);
-            if (!root) root = view.superview.superview ? view.superview.superview : view.superview;
+            if (!root) root = view.superview.superview;
             if (root) {
                 recolorBlueView(root);
                 if (kAshteModern) ashteModernize(root);
@@ -1048,6 +1035,8 @@ for t in targets:
         fat = lief.MachO.parse(t)
         if fat:
             for b in fat:
+                if any(getattr(l, "name", "") == "@executable_path/Frameworks/libashte.dylib" for l in b.libraries):
+                    continue
                 b.add_library("@executable_path/Frameworks/libashte.dylib")
             fat.write(t)
             print(f"  Injected @executable_path/Frameworks/libashte.dylib -> {rel}")
