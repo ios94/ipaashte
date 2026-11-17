@@ -281,12 +281,15 @@ static BOOL hooked_openURL(id self, SEL _cmd, NSURL *url) {
     return orig_openURL(self, _cmd, url);
 }
 
-// Heart button: it starts a web sign-in session (x.com). Skip it and open Telegram directly.
+// Heart button: it starts a web session to x.com. Skip only that one and open Telegram directly.
 static const void *kSkipSessionKey = &kSkipSessionKey;
 static BOOL isHeartLink(NSURL *url) {
+    // ONLY the Twitter / X link of the heart button. The iOSGods login must keep working.
     NSString *s = url.absoluteString.lowercaseString ?: @"";
-    return [s containsString:@"iosgods"] || [s containsString:@"twitter"] || [s containsString:@"x.com"] ||
-           [s containsString:@"facebook"] || [s containsString:@"youtube"] || [s containsString:@"t.me"];
+    if ([s containsString:@"iosgods"]) return NO;
+    NSString *host = url.host.lowercaseString ?: @"";
+    return [host isEqualToString:@"x.com"] || [host hasSuffix:@".x.com"] ||
+           [host isEqualToString:@"twitter.com"] || [host hasSuffix:@".twitter.com"];
 }
 
 static id (*orig_asInit)(id, SEL, NSURL *, NSString *, id) = NULL;
