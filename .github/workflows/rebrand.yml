@@ -10,7 +10,7 @@ on:
       menu_title:
         description: "Mod menu title"
         required: true
-        default: "Ashte Mod"
+        default: "AshteMobile"
       from_tag:
         description: "Release to download IPAs from"
         required: true
