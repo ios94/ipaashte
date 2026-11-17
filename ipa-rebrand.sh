@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ipa-rebrand.sh (Universal Multi-IPA Edition + ViP Popup Blocker)
+# ipa-rebrand.sh (Universal Multi-IPA Edition + Hardcore ViP Blocker)
 
 set -euo pipefail
 
@@ -92,57 +92,123 @@ static BOOL isMenuRed(UIColor *color, BOOL *isDarkHeader) {
     return NO;
 }
 
-// پشکنەر بۆ دۆزینەوەی پەنجەرەی Join ViP لەناو هەر Viewـێکدا
+// پشکنینی هەموو جۆرە تێکستێک (ئاسایی، Attributed، دوگمە، Accessibility)
+static BOOL isViPString(NSString *s) {
+    if (!s || s.length < 5) return NO;
+    if ([s rangeOfString:@"Join the ViP" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [s rangeOfString:@"Unlimited Feature Access" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [s rangeOfString:@"ViP purchases are non-refundable" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [s rangeOfString:@"Priority Requests" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [s rangeOfString:@"Get access to all hack features" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [s rangeOfString:@"Enjoy an ad-free experience" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [s isEqualToString:@"Maybe Later"] ||
+        [s isEqualToString:@"Join Now!"]) {
+        return YES;
+    }
+    return NO;
+}
+
+static NSString *extractViewText(UIView *view) {
+    if (!view) return nil;
+    if ([view isKindOfClass:[UILabel class]]) {
+        UILabel *l = (UILabel *)view;
+        if (l.text.length > 0) return l.text;
+        if (l.attributedText.string.length > 0) return l.attributedText.string;
+    } else if ([view isKindOfClass:[UIButton class]]) {
+        UIButton *b = (UIButton *)view;
+        NSString *t = [b titleForState:UIControlStateNormal] ?: b.titleLabel.text ?: b.currentAttributedTitle.string;
+        if (t.length > 0) return t;
+    } else if ([view isKindOfClass:[UITextView class]]) {
+        UITextView *tv = (UITextView *)view;
+        if (tv.text.length > 0) return tv.text;
+        if (tv.attributedText.string.length > 0) return tv.attributedText.string;
+    }
+    if (view.accessibilityLabel.length > 0) return view.accessibilityLabel;
+    return nil;
+}
+
 static BOOL containsViPPopupContent(UIView *view) {
     if (!view) return NO;
     NSString *cls = NSStringFromClass([view class]);
-    if ([cls rangeOfString:@"IGG" options:NSCaseInsensitiveSearch].location != NSNotFound &&
-        [cls rangeOfString:@"VIP" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+    if ([cls rangeOfString:@"VIP" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [cls rangeOfString:@"Upsell" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [cls rangeOfString:@"Paywall" options:NSCaseInsensitiveSearch].location != NSNotFound) {
         return YES;
     }
-    if ([view isKindOfClass:[UILabel class]]) {
-        NSString *t = ((UILabel *)view).text ?: @"";
-        if ([t rangeOfString:@"Join the ViP community" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [t rangeOfString:@"Unlimited Feature Access" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [t rangeOfString:@"ViP purchases are non-refundable" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [t rangeOfString:@"Priority Requests" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            return YES;
-        }
-    } else if ([view isKindOfClass:[UIButton class]]) {
-        UIButton *btn = (UIButton *)view;
-        NSString *bt = [btn titleForState:UIControlStateNormal] ?: btn.titleLabel.text ?: @"";
-        if ([bt isEqualToString:@"Maybe Later"] || [bt isEqualToString:@"Join Now!"]) {
-            return YES;
-        }
-    }
+    NSString *txt = extractViewText(view);
+    if (isViPString(txt)) return YES;
+
     for (UIView *sub in [view.subviews copy]) {
         if (containsViPPopupContent(sub)) return YES;
     }
     return NO;
 }
 
-static void dismissOrHideViPView(UIView *view) {
+// سڕینەوەی تەواوەتی پەنجەرەی ViP (چ ViewController بێت، چ UIWindow، چ Subview)
+static void nukeViPFromView(UIView *view) {
     if (!view) return;
+
+    // ئەگەر دوگمەی Maybe Later بوو، خۆکارانە دایبگرە با مۆدەکە خۆی دایبخات
+    if ([view isKindOfClass:[UIButton class]]) {
+        UIButton *btn = (UIButton *)view;
+        NSString *bt = extractViewText(btn) ?: @"";
+        if ([bt rangeOfString:@"Maybe Later" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
+        }
+    }
+
+    // ١) گەڕان بەدوای UIViewController بۆ داخستنی فەرمی
     UIResponder *resp = view;
+    UIViewController *foundVC = nil;
     while (resp) {
         if ([resp isKindOfClass:[UIViewController class]]) {
-            UIViewController *vc = (UIViewController *)resp;
-            if (vc.presentingViewController) {
-                [vc dismissViewControllerAnimated:NO completion:nil];
-                return;
-            }
+            foundVC = (UIViewController *)resp;
+            break;
         }
         resp = [resp nextResponder];
     }
-    // ئەگەر وەک subview دانرابوو، بیشارەوە و لایببە
-    UIView *target = view;
-    while (target.superview && ![target.superview isKindOfClass:[UIWindow class]]) {
-        target = target.superview;
+
+    if (foundVC) {
+        if (foundVC.presentingViewController) {
+            [foundVC dismissViewControllerAnimated:NO completion:nil];
+            return;
+        }
+        if (foundVC.navigationController && foundVC.navigationController.viewControllers.count > 1) {
+            [foundVC.navigationController popViewControllerAnimated:NO];
+            return;
+        }
+        if (foundVC.parentViewController) {
+            [foundVC willMoveToParentViewController:nil];
+            [foundVC.view removeFromSuperview];
+            [foundVC removeFromParentViewController];
+            return;
+        }
     }
-    target.hidden = YES;
-    target.alpha = 0.0;
-    target.userInteractionEnabled = NO;
-    [target removeFromSuperview];
+
+    // ٢) ئەگەر لەسەر UIWindowـی تایبەت بوو (کە iGameGod زۆرجار بەکاریدەهێنێت)
+    UIWindow *win = view.window;
+    UIWindow *mainWin = [UIApplication sharedApplication].delegate.window;
+    if (win && win != mainWin && win.windowLevel >= UIWindowLevelNormal) {
+        if (foundVC && win.rootViewController == foundVC) {
+            win.hidden = YES;
+            win.alpha = 0.0;
+            win.userInteractionEnabled = NO;
+            win.rootViewController = nil;
+            return;
+        }
+    }
+
+    // ٣) دۆزینەوەی گەورەترین قاڵبی پەنجەرەکە و شاردنەوەی
+    UIView *container = view;
+    while (container.superview &&
+           ![container.superview isKindOfClass:[UIWindow class]] &&
+           container.superview != mainWin.rootViewController.view) {
+        container = container.superview;
+    }
+    container.hidden = YES;
+    container.alpha = 0.0;
+    container.userInteractionEnabled = NO;
+    [container removeFromSuperview];
 }
 
 static void openTelegramChannel(void) {
@@ -179,7 +245,16 @@ static BOOL hooked_openURL(id self, SEL _cmd, NSURL *url) {
     return orig_openURL(self, _cmd, url);
 }
 
-// بلۆککردنی پەنجەرەی ViP پێش ئەوەی بێتە سەر شاشە + گۆڕینی پۆپ-ئەپی سەرەتا
+static void (*orig_viewDidAppear)(id, SEL, BOOL) = NULL;
+static void hooked_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
+    orig_viewDidAppear(self, _cmd, animated);
+    NSString *vcClass = NSStringFromClass([self class]);
+    if ([vcClass rangeOfString:@"VIP" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        containsViPPopupContent(self.view)) {
+        nukeViPFromView(self.view);
+    }
+}
+
 static void (*orig_presentVC)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *vcToPresent, BOOL flag, void (^completion)(void)) {
     if (!vcToPresent) {
@@ -187,15 +262,18 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *vcToPresent, B
         return;
     }
 
-    // 1. پشکنین بۆ پەنجەرەی Join ViP و بلۆککردنی دەستبەجێ
+    // Force view load to inspect its contents before presenting
+    UIView *v = vcToPresent.view;
+    [v layoutIfNeeded];
+
     NSString *vcClass = NSStringFromClass([vcToPresent class]);
     if ([vcClass rangeOfString:@"VIP" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        containsViPPopupContent(vcToPresent.view)) {
+        [vcClass rangeOfString:@"Paywall" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        containsViPPopupContent(v)) {
         if (completion) completion();
-        return; // ڕێگە مەدە پەنجەرەکە پیشان بدرێت
+        return;
     }
 
-    // 2. گۆڕینی UIAlertController بۆ تێلێگرام
     if ([vcToPresent isKindOfClass:[UIAlertController class]]) {
         UIAlertController *alert = (UIAlertController *)vcToPresent;
         BOOL isModPopup = NO;
@@ -273,15 +351,11 @@ static void scrubLayer(CALayer *layer) {
 static void scrubViewHierarchy(UIView *view) {
     if (!view || view.hidden) return;
 
-    // 0. ئەگەر پەنجەرەی Join ViP لەناو شاشەکە دەرکەوت، یەکسەر دایبخە و بیشارەوە
-    if ([view isKindOfClass:[UILabel class]]) {
-        NSString *txt = ((UILabel *)view).text ?: @"";
-        if ([txt rangeOfString:@"Join the ViP community" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [txt rangeOfString:@"Unlimited Feature Access" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [txt rangeOfString:@"ViP purchases are non-refundable" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            dismissOrHideViPView(view);
-            return;
-        }
+    // 0. پشکنینی خێرا بۆ سڕینەوەی پەنجەرەی Join ViP
+    NSString *vText = extractViewText(view);
+    if (isViPString(vText)) {
+        nukeViPFromView(view);
+        return;
     }
 
     // 1. Change Red menu background, switch buttons & layers to custom color
@@ -379,6 +453,12 @@ static void initAshteHook(void) {
         method_setImplementation(mPres, (IMP)hooked_presentVC);
     }
 
+    Method mAppear = class_getInstanceMethod([UIViewController class], @selector(viewDidAppear:));
+    if (mAppear) {
+        orig_viewDidAppear = (void *)method_getImplementation(mAppear);
+        method_setImplementation(mAppear, (IMP)hooked_viewDidAppear);
+    }
+
     Method mOpenOpts = class_getInstanceMethod([UIApplication class], @selector(openURL:options:completionHandler:));
     if (mOpenOpts) {
         orig_openURL_opts = (void *)method_getImplementation(mOpenOpts);
@@ -391,11 +471,15 @@ static void initAshteHook(void) {
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        [NSTimer scheduledTimerWithTimeInterval:0.12 repeats:YES block:^(NSTimer * _Nonnull timer) {
+        [NSTimer scheduledTimerWithTimeInterval:0.08 repeats:YES block:^(NSTimer * _Nonnull timer) {
             for (UIWindow *win in getAllWindows()) {
-                // ئەگەر پەنجەرەیەک تایبەت بوو بە ViP، تەواوی پەنجەرەکە بشارەوە
-                if (containsViPPopupContent(win.rootViewController.presentedViewController.view)) {
-                    [win.rootViewController dismissViewControllerAnimated:NO completion:nil];
+                if (win.hidden) continue;
+                UIViewController *topVC = win.rootViewController;
+                while (topVC.presentedViewController) {
+                    topVC = topVC.presentedViewController;
+                }
+                if (topVC && containsViPPopupContent(topVC.view)) {
+                    nukeViPFromView(topVC.view);
                 }
                 scrubViewHierarchy(win);
             }
@@ -535,7 +619,7 @@ PY
   cp "$WORK/libashte.dylib" "$APP/Frameworks/libashte.dylib"
   resize "$MENU_ICON" 120 120 "$APP/ashte_menu_icon.png"
 
-  # 4) Universal Injection: Inject into ALL mod dylibs + Main Executable
+  # 4) Universal Injection: Inject into ALL mod dylibs + Main Executable (Every binary loads it!)
   python3 - "$APP" <<'PY'
 import os, sys, plistlib, lief
 
@@ -550,7 +634,7 @@ for root, _, names in os.walk(app):
             targets.append(os.path.join(root, n))
 
 main_path = os.path.join(app, main_exe)
-if not targets and os.path.isfile(main_path):
+if os.path.isfile(main_path):
     targets.append(main_path)
 
 dylib_ref = "@executable_path/libashte.dylib"
