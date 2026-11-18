@@ -60,8 +60,7 @@ jobs:
           IPA_LINK: ${{ inputs.ipa_link }}
           PAGE_LINK: ${{ inputs.page_link }}
         run: |
-          chmod +x ipa-rebrand.sh
-          ./ipa-rebrand.sh
+          bash ./ipa-rebrand.sh
 
       - name: Commit ashte.json, img and imgg
         run: |
@@ -78,6 +77,6 @@ jobs:
             echo "No changes in ashte.json / images"
           else
             git commit -m "Update ashte.json"
-            git pull --rebase
+            git pull --rebase --autostash
             git push
           fi
