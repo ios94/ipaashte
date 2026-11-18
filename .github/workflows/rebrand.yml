@@ -49,6 +49,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
           FROM_TAG: ${{ inputs.from_tag }}
           TO_TAG: ${{ inputs.to_tag }}
           NEW_NAME: ${{ inputs.app_name }}
@@ -61,3 +62,16 @@ jobs:
         run: |
           chmod +x ipa-rebrand.sh
           ./ipa-rebrand.sh
+
+      - name: Commit ashte.json, img and imgg
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add ashte.json img imgg
+          if git diff --cached --quiet; then
+            echo "No changes in ashte.json / images"
+          else
+            git commit -m "Update ashte.json"
+            git pull --rebase
+            git push
+          fi
