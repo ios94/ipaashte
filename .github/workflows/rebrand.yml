@@ -65,9 +65,15 @@ jobs:
 
       - name: Commit ashte.json, img and imgg
         run: |
+          if [ ! -f ashte.json ]; then
+            echo "::warning::ashte.json was not created. Open the 'Run script' log and read the lines after '== Building ashte.json'"
+            exit 0
+          fi
+          mkdir -p img imgg
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-          git add ashte.json img imgg
+          git add ashte.json
+          git add img imgg
           if git diff --cached --quiet; then
             echo "No changes in ashte.json / images"
           else
