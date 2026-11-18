@@ -974,6 +974,33 @@ for ipa in "$WORK"/in/*.ipa; do
   unzip -q "$ipa" -d "$T"
   APP="$(ls -d "$T"/Payload/*.app | head -n1)"
 
+  # 0) Build a clean output file name (game name instead of long hash names)
+  CLEAN="$(python3 - "$APP/Info.plist" "$fname" "$NEW_NAME" <<'PY'
+import plistlib, sys, re
+path, fname, new_name = sys.argv[1:4]
+n = ''
+try:
+    with open(path, 'rb') as f:
+        d = plistlib.load(f)
+    n = d.get('CFBundleDisplayName') or d.get('CFBundleName') or ''
+except Exception:
+    pass
+if not n or new_name not in ('', 'keep', 'My App'):
+    n = re.sub(r'\.ipa$', '', fname, flags=re.I)
+    n = re.sub(r'^[0-9a-f]{32}_', '', n)
+    n = re.sub(r'^ashte_', '', n)
+    n = re.sub(r'\.signed$', '', n)
+    n = re.sub(r'_\d+_com.*$', '', n)
+n = re.sub(r'[^A-Za-z0-9._-]+', '_', n).strip('._') or 'app'
+print(n + '.ipa')
+PY
+)"
+  echo "== Output name: $CLEAN"
+  if grep -Fxq "$CLEAN" "$EXISTING"; then
+    echo "== Skipping (already in $TO_TAG): $CLEAN"
+    continue
+  fi
+
   # 1) Keep original game name unless user explicitly typed a custom name
   if [[ -n "$NEW_NAME" && "$NEW_NAME" != "My App" && "$NEW_NAME" != "keep" ]]; then
     python3 - "$APP/Info.plist" "$NEW_NAME" <<'PY'
@@ -1131,8 +1158,8 @@ for t in targets:
         print(f"  Skipped {rel}: {e}")
 PY
 
-  # 5) Re-pack IPA with its original filename
-  (cd "$T" && zip -qry "$WORK/out/$fname" Payload)
+  # 5) Re-pack IPA with the clean name
+  (cd "$T" && zip -qry "$WORK/out/$CLEAN" Payload)
 done
 
 echo "== Uploading all rebranded IPAs to $TO_TAG"
