@@ -3,10 +3,6 @@ name: Rebrand IPA
 on:
   workflow_dispatch:
     inputs:
-      app_name:
-        description: "New app name (leave as 'keep' to keep each game's original name)"
-        required: true
-        default: "keep"
       menu_title:
         description: "Mod menu title"
         required: true
@@ -56,7 +52,6 @@ jobs:
           BRANCH: ${{ github.ref_name }}
           FROM_TAG: ${{ inputs.from_tag }}
           TO_TAG: ${{ inputs.to_tag }}
-          NEW_NAME: ${{ inputs.app_name }}
           NEW_LOGO: logo.png
           MENU_ICON: menu_icon.png
           MENU_TITLE: ${{ inputs.menu_title }}
