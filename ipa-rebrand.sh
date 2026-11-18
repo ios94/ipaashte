@@ -960,10 +960,14 @@ if [[ "$SKIP_EXISTING" == "true" && "$GAME" == "all" ]]; then
   gh release view "$TO_TAG" -R "$REPO" --json assets -q '.assets[].name' >"$EXISTING" 2>/dev/null || true
 fi
 
+MAP="$WORK/map.tsv"   # input IPA name <TAB> name inside the TO_TAG release (used for ashte.json)
+: > "$MAP"
+
 for ipa in "$WORK"/in/*.ipa; do
   fname="$(basename "$ipa")"
   if grep -Fxq "$fname" "$EXISTING"; then
     echo "== Skipping (already in $TO_TAG): $fname"
+    printf '%s\t%s\n' "$fname" "$fname" >> "$MAP"
     continue
   fi
   echo "=========================================="
@@ -998,6 +1002,7 @@ PY
   echo "== Output name: $CLEAN"
   if grep -Fxq "$CLEAN" "$EXISTING"; then
     echo "== Skipping (already in $TO_TAG): $CLEAN"
+    printf '%s\t%s\n' "$fname" "$CLEAN" >> "$MAP"
     continue
   fi
 
@@ -1160,6 +1165,7 @@ PY
 
   # 5) Re-pack IPA with the clean name
   (cd "$T" && zip -qry "$WORK/out/$CLEAN" Payload)
+  printf '%s\t%s\n' "$fname" "$CLEAN" >> "$MAP"
 done
 
 echo "== Uploading all rebranded IPAs to $TO_TAG"
@@ -1172,6 +1178,246 @@ if [[ ${#OUT_FILES[@]} -eq 0 ]]; then
 else
   gh release upload "$TO_TAG" "${OUT_FILES[@]}" -R "$REPO" --clobber
 fi
+
+# ---------------------------------------------------------------
+# Build / update ashte.json (AltStore-style source) + img/ + imgg/
+# ---------------------------------------------------------------
+gh release view "$TO_TAG" -R "$REPO" --json assets > "$WORK/assets.json" 2>/dev/null \
+  || echo '{"assets":[]}' > "$WORK/assets.json"
+
+cat > "$WORK/make_source.py" <<'PYSRC'
+import os, sys, json, re, zipfile, plistlib, hashlib, difflib, datetime
+import urllib.request, urllib.parse
+
+WORK = os.environ["WORK"]
+REPO = os.environ["REPO"]
+TAG = os.environ["TO_TAG"]
+BRANCH = os.environ.get("BRANCH", "main")
+OUT_JSON = os.environ.get("SOURCE_FILE", "ashte.json")
+RAW = "https://raw.githubusercontent.com/%s/%s" % (REPO, BRANCH)
+REL = "https://github.com/%s/releases/download/%s" % (REPO, urllib.parse.quote(TAG))
+UA = {"User-Agent": "Mozilla/5.0"}
+NOW = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+DEFAULTS = {
+    "name": "Ashtemobile",
+    "subtitle": "A source for all of my apps & games",
+    "description": "Welcome to my source! Here you'll find all of my apps.",
+    "iconURL": "https://ashtemobile.site/logo.png",
+    "website": "https://ashtemobile.site/",
+    "patreonURL": "https://ashtemobile.site/Ashtemobile.json",
+    "tintColor": "#ff007f",
+    "featuredApps": [],
+    "headerURL": "https://ashtemobile.site/logo.png",
+}
+
+
+def fetch(url, timeout=40):
+    try:
+        req = urllib.request.Request(url, headers=UA)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+    except Exception as e:
+        print("  fetch failed: %s (%s)" % (url, e))
+        return None
+
+
+def fetch_json(url):
+    b = fetch(url)
+    if not b:
+        return None
+    try:
+        return json.loads(b.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def save(path, url):
+    b = fetch(url)
+    if not b:
+        return False
+    with open(path, "wb") as f:
+        f.write(b)
+    return True
+
+
+def norm(s):
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def appstore(bundle, name):
+    """Look the app up in the App Store: by bundle id first, then by (similar) name."""
+    j = fetch_json("https://itunes.apple.com/lookup?bundleId=%s&country=us&entity=software"
+                   % urllib.parse.quote(bundle))
+    if j and j.get("resultCount"):
+        return j["results"][0]
+    if name:
+        j = fetch_json("https://itunes.apple.com/search?term=%s&country=us&entity=software&limit=5"
+                       % urllib.parse.quote(name))
+        best, score = None, 0.0
+        for r in (j or {}).get("results", []):
+            s = difflib.SequenceMatcher(None, norm(name), norm(r.get("trackName"))).ratio()
+            if s > score:
+                best, score = r, s
+        if best and score >= 0.8:
+            return best
+    return None
+
+
+def read_info(path):
+    try:
+        with zipfile.ZipFile(path) as z:
+            for n in z.namelist():
+                if re.match(r"^Payload/[^/]+\.app/Info\.plist$", n):
+                    return plistlib.loads(z.read(n))
+    except Exception as e:
+        print("  cannot read Info.plist from %s (%s)" % (path, e))
+    return {}
+
+
+os.makedirs("img", exist_ok=True)
+os.makedirs("imgg", exist_ok=True)
+
+data = {}
+if os.path.isfile(OUT_JSON):
+    try:
+        with open(OUT_JSON, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+for k, v in DEFAULTS.items():
+    data.setdefault(k, v)
+
+apps = data.get("apps") or []
+by_bundle = {a.get("bundleIdentifier"): a for a in apps if a.get("bundleIdentifier")}
+
+sizes = {}
+try:
+    with open(os.path.join(WORK, "assets.json"), encoding="utf-8") as f:
+        for a in json.load(f).get("assets", []):
+            sizes[a["name"]] = a.get("size")
+except Exception:
+    pass
+
+pairs = []
+with open(os.path.join(WORK, "map.tsv"), encoding="utf-8") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        if "\t" in line:
+            pairs.append(tuple(line.split("\t", 1)))
+
+for fname, out in pairs:
+    print("== JSON: %s" % out)
+    info = read_info(os.path.join(WORK, "in", fname))
+    bundle = info.get("CFBundleIdentifier")
+    if not bundle:
+        print("  no bundle id, skipped")
+        continue
+
+    size = sizes.get(out)
+    if not size:
+        p = os.path.join(WORK, "out", out)
+        size = os.path.getsize(p) if os.path.isfile(p) else None
+    if not size:
+        print("  not found in release %s, skipped" % TAG)
+        continue
+
+    plist_name = info.get("CFBundleDisplayName") or info.get("CFBundleName") or out[:-4]
+    version = str(info.get("CFBundleShortVersionString") or info.get("CFBundleVersion") or "1.0")
+    build = info.get("CFBundleVersion")
+    min_os = str(info.get("MinimumOSVersion") or "15.0")
+    slug = re.sub(r"[^a-z0-9]", "", out[:-4].lower()) or hashlib.md5(bundle.encode()).hexdigest()[:8]
+    dl = "%s/%s" % (REL, urllib.parse.quote(out))
+
+    old = by_bundle.get(bundle) or {}
+
+    # ---- does this app still miss something? then ask the App Store
+    icon_rel = old.get("icon") or ""
+    if icon_rel and not os.path.isfile(icon_rel):
+        icon_rel = ""
+    shots = list(old.get("screenshotURLs") or [])
+    desc = old.get("localizedDescription") or ""
+    store = None
+    if not (icon_rel and shots and desc):
+        store = appstore(bundle, plist_name)
+        print("  App Store: %s" % ((store or {}).get("trackName") or "not found"))
+
+    # ---- icon -> img/
+    if not icon_rel and store and store.get("artworkUrl512"):
+        u = store["artworkUrl512"]
+        ext = os.path.splitext(urllib.parse.urlparse(u).path)[1] or ".jpg"
+        rel = "img/%s%s" % (slug, ext)
+        if os.path.isfile(rel) or save(rel, u):
+            icon_rel = rel
+
+    # ---- iPhone screenshots -> imgg/
+    if not shots and store:
+        urls = store.get("screenshotUrls") or store.get("ipadScreenshotUrls") or []
+        for i, u in enumerate(urls[:5], 1):
+            ext = os.path.splitext(urllib.parse.urlparse(u).path)[1] or ".png"
+            rel = "imgg/%s_screen_%d%s" % (slug, i, ext)
+            if os.path.isfile(rel) or save(rel, u):
+                shots.append("%s/%s" % (RAW, rel))
+
+    # ---- genres -> description
+    genres = [g for g in ((store or {}).get("genres") or []) if g]
+    if not desc and genres:
+        desc = "Genre: " + ", ".join(genres)
+
+    is_game = bool(store) and ("Games" in genres or store.get("primaryGenreName") == "Games")
+    typ = old.get("type") or ("games" if is_game else "apps")
+
+    date = NOW
+    for v in old.get("versions") or []:
+        if v.get("version") == version and v.get("date"):
+            date = v["date"]
+
+    icon_url = ("%s/%s" % (RAW, icon_rel)) if icon_rel else data["iconURL"]
+    app_id = old.get("id") or (store or {}).get("trackId") or int(hashlib.md5(bundle.encode()).hexdigest()[:8], 16)
+
+    entry = {
+        "id": app_id,
+        "name": old.get("name") or (store or {}).get("trackName") or plist_name,
+        "version": version,
+        "size": size,
+        "icon": icon_rel,
+        "badge": old.get("badge", ""),
+        "type": typ,
+        "install_url": dl,
+        "download_url": dl,
+        "bundleIdentifier": bundle,
+        "marketplaceID": old.get("marketplaceID", ""),
+        "developerName": old.get("developerName") or "AshteMobile",
+        "subtitle": old.get("subtitle") or "Awesome App",
+        "localizedDescription": desc,
+        "iconURL": icon_url,
+        "tintColor": old.get("tintColor") or "#04ecfc",
+        "category": old.get("category") or typ,
+        "screenshotURLs": shots,
+        "screenshots": shots,
+        "versions": [{
+            "version": version,
+            "date": date,
+            "localizedDescription": None,
+            "downloadURL": dl,
+            "size": size,
+            "buildVersion": build,
+            "minOSVersion": min_os,
+            "screenshots": shots,
+        }],
+    }
+    by_bundle[bundle] = entry
+
+data["apps"] = sorted(by_bundle.values(), key=lambda a: (a.get("name") or "").lower())
+with open(OUT_JSON, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=4, ensure_ascii=False)
+    f.write("\n")
+print("== %s written: %d app(s)" % (OUT_JSON, len(data["apps"])))
+PYSRC
+
+echo "== Building ashte.json"
+WORK="$WORK" REPO="$REPO" TO_TAG="$TO_TAG" BRANCH="${BRANCH:-main}" SOURCE_FILE="${SOURCE_FILE:-ashte.json}" \
+  python3 "$WORK/make_source.py" || echo "WARNING: ashte.json step failed (IPAs were uploaded normally)"
 
 rm -rf "$WORK/tmp"
 echo "Done."
