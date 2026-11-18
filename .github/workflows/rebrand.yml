@@ -31,6 +31,10 @@ on:
         description: "Optional: ANY direct link of ONE IPA (GitHub, Dropbox, Google Drive, any site). Empty = all IPAs from from_tag"
         required: false
         default: ""
+      page_link:
+        description: "Optional: app page link (icon + screenshots source, or an App Store link). Used only together with ipa_link"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -59,6 +63,7 @@ jobs:
           MENU_COLOR_HEX: ${{ inputs.menu_color_hex }}
           MENU_MODERN: ${{ inputs.menu_modern }}
           IPA_LINK: ${{ inputs.ipa_link }}
+          PAGE_LINK: ${{ inputs.page_link }}
         run: |
           chmod +x ipa-rebrand.sh
           ./ipa-rebrand.sh
