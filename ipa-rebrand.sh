@@ -10,6 +10,28 @@ NEW_NAME="${NEW_NAME:-keep}"
 GAME="${GAME:-all}"                 # all = every game, or part of the IPA file name
 SKIP_EXISTING="${SKIP_EXISTING:-true}"  # true = skip IPAs already uploaded to TO_TAG
 IPA_LINK="${IPA_LINK:-}"             # optional: full release link of ONE ipa to process
+PAGE_LINK="${PAGE_LINK:-}"           # optional: app page link (icon/screenshots source), used for ONE ipa only
+
+# If both links were pasted into ipa_link (separated by space / comma / new line), split them
+if [[ -n "${IPA_LINK//[[:space:]]/}" ]]; then
+  _split="$(python3 - "$IPA_LINK" <<'PYL'
+import sys, re
+raw = sys.argv[1]
+urls = re.findall(r'https?://[^\s,;<>"]+', raw)
+if not urls:
+    print(raw.strip().split()[0] + "\t-")
+else:
+    ipa = next((u for u in urls if re.search(r'\.ipa($|[?#])', u, re.I) or '/releases/download/' in u), urls[0])
+    rest = [u for u in urls if u != ipa]
+    print(ipa + "\t" + (rest[0] if rest else "-"))
+PYL
+)"
+  IPA_LINK="${_split%%$'\t'*}"
+  _extra="${_split#*$'\t'}"
+  if [[ "$_extra" != "-" && -z "$PAGE_LINK" ]]; then PAGE_LINK="$_extra"; fi
+else
+  IPA_LINK=""
+fi
 
 LINK_FILE=""
 DIRECT_URL=""
@@ -1275,6 +1297,107 @@ def read_info(path):
     return {}
 
 
+IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
+IMG_RE = r"\.(?:jpe?g|png|webp)(?:$|[?#])"
+PAGE_LINK = os.environ.get("PAGE_LINK", "").strip()
+
+
+def store_by_id(app_id):
+    j = fetch_json("https://itunes.apple.com/lookup?id=%s&country=us" % app_id)
+    if j and j.get("resultCount"):
+        return j["results"][0]
+    return None
+
+
+def meta(html, key):
+    k = re.escape(key)
+    for pat in (r'<meta[^>]+(?:property|name)=["\']%s["\'][^>]*content=["\']([^"\']+)["\']' % k,
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]*(?:property|name)=["\']%s["\']' % k):
+        m = re.search(pat, html, re.I)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def json_images(node, out):
+    """collect image-like strings from JSON-LD"""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k.lower() in ("image", "screenshot", "screenshots", "thumbnailurl") :
+                for s in (v if isinstance(v, list) else [v]):
+                    if isinstance(s, str):
+                        out.append(s)
+                    elif isinstance(s, dict) and isinstance(s.get("url"), str):
+                        out.append(s["url"])
+            else:
+                json_images(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            json_images(v, out)
+
+
+def scrape_page(url):
+    """Read an app page (any site, or an App Store link). Returns icon / screenshots / App Store record if found."""
+    res = {"store": None, "icon": None, "shots": []}
+    appid = r"apps\.apple\.com/[^\s\"'<>]*?/id(\d+)"
+    m = re.search(appid, url)
+    if m:
+        res["store"] = store_by_id(m.group(1))
+        if res["store"]:
+            return res
+    b = fetch(url)
+    if not b:
+        return res
+    html = b.decode("utf-8", "ignore")
+    m = re.search(appid, html)
+    if m:
+        res["store"] = store_by_id(m.group(1))
+
+    imgs = []
+    ogimg = meta(html, "og:image") or meta(html, "twitter:image")
+    for u in re.findall(r'<img[^>]+(?:src|data-src)=["\']([^"\']+)["\']', html, re.I):
+        imgs.append(u)
+    for blk in re.findall(r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>', html, re.S | re.I):
+        try:
+            json_images(json.loads(blk), imgs)
+        except Exception:
+            pass
+    seen, clean = set(), []
+    for u in imgs:
+        u = urllib.parse.urljoin(url, u.strip())
+        if u in seen or not re.search(IMG_RE, u, re.I) or re.search(r"logo|favicon|avatar|sprite|banner", u, re.I):
+            continue
+        seen.add(u)
+        clean.append(u)
+    icons = [u for u in clean if re.search(r"icon", u, re.I)]
+    res["shots"] = [u for u in clean if re.search(r"screen|shot", u, re.I)]
+    if icons:
+        res["icon"] = icons[0]
+    elif ogimg and re.search(IMG_RE, urllib.parse.urljoin(url, ogimg), re.I) and not re.search(r"logo", ogimg, re.I):
+        res["icon"] = urllib.parse.urljoin(url, ogimg)
+    return res
+
+
+def get_icon(url, slug):
+    ext = os.path.splitext(urllib.parse.urlparse(url).path)[1].lower()
+    if ext not in IMG_EXT:
+        ext = ".jpg"
+    rel = "img/%s%s" % (slug, ext)
+    return rel if (os.path.isfile(rel) or save(rel, url)) else ""
+
+
+def get_shots(urls, slug):
+    out = []
+    for i, u in enumerate(urls[:5], 1):
+        ext = os.path.splitext(urllib.parse.urlparse(u).path)[1].lower()
+        if ext not in IMG_EXT:
+            ext = ".png"
+        rel = "imgg/%s_screen_%d%s" % (slug, i, ext)
+        if os.path.isfile(rel) or save(rel, u):
+            out.append("%s/%s" % (RAW, rel))
+    return out
+
+
 os.makedirs("img", exist_ok=True)
 os.makedirs("imgg", exist_ok=True)
 
@@ -1331,33 +1454,34 @@ for fname, out in pairs:
 
     old = by_bundle.get(bundle) or {}
 
-    # ---- does this app still miss something? then ask the App Store
+    # ---- icon / screenshots / description: existing entry -> app page -> App Store
     icon_rel = old.get("icon") or ""
     if icon_rel and not os.path.isfile(icon_rel):
         icon_rel = ""
     shots = list(old.get("screenshotURLs") or [])
     desc = old.get("localizedDescription") or ""
     store = None
+
+    if PAGE_LINK and len(pairs) == 1:
+        page = scrape_page(PAGE_LINK)
+        store = page["store"]
+        print("  Page: icon=%s screenshots=%d App Store link=%s" % (
+            "yes" if page["icon"] else "no", len(page["shots"]), "yes" if store else "no"))
+        if not icon_rel and page["icon"]:
+            icon_rel = get_icon(page["icon"], slug)
+        if not shots and page["shots"]:
+            shots = get_shots(page["shots"], slug)
+        if not (page["icon"] or page["shots"] or store):
+            print("  The page gave no readable images (it is probably built with JavaScript). Using the App Store.")
+
     if not (icon_rel and shots and desc):
-        store = appstore(bundle, plist_name)
+        if not store:
+            store = appstore(bundle, plist_name)
         print("  App Store: %s" % ((store or {}).get("trackName") or "not found"))
-
-    # ---- icon -> img/
     if not icon_rel and store and store.get("artworkUrl512"):
-        u = store["artworkUrl512"]
-        ext = os.path.splitext(urllib.parse.urlparse(u).path)[1] or ".jpg"
-        rel = "img/%s%s" % (slug, ext)
-        if os.path.isfile(rel) or save(rel, u):
-            icon_rel = rel
-
-    # ---- iPhone screenshots -> imgg/
+        icon_rel = get_icon(store["artworkUrl512"], slug)
     if not shots and store:
-        urls = store.get("screenshotUrls") or store.get("ipadScreenshotUrls") or []
-        for i, u in enumerate(urls[:5], 1):
-            ext = os.path.splitext(urllib.parse.urlparse(u).path)[1] or ".png"
-            rel = "imgg/%s_screen_%d%s" % (slug, i, ext)
-            if os.path.isfile(rel) or save(rel, u):
-                shots.append("%s/%s" % (RAW, rel))
+        shots = get_shots(store.get("screenshotUrls") or store.get("ipadScreenshotUrls") or [], slug)
 
     # ---- genres -> description
     genres = [g for g in ((store or {}).get("genres") or []) if g]
@@ -1416,7 +1540,7 @@ print("== %s written: %d app(s)" % (OUT_JSON, len(data["apps"])))
 PYSRC
 
 echo "== Building ashte.json"
-WORK="$WORK" REPO="$REPO" TO_TAG="$TO_TAG" BRANCH="${BRANCH:-main}" SOURCE_FILE="${SOURCE_FILE:-ashte.json}" \
+WORK="$WORK" REPO="$REPO" TO_TAG="$TO_TAG" BRANCH="${BRANCH:-main}" PAGE_LINK="${IPA_LINK:+$PAGE_LINK}" SOURCE_FILE="${SOURCE_FILE:-ashte.json}" \
   python3 "$WORK/make_source.py" || echo "WARNING: ashte.json step failed (IPAs were uploaded normally)"
 
 rm -rf "$WORK/tmp"
