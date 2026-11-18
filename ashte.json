@@ -1,0 +1,64 @@
+{
+    "name": "Ashtemobile",
+    "subtitle": "A source for all of my apps & games",
+    "description": "Welcome to my source! Here you'll find all of my apps.",
+    "iconURL": "https://ashtemobile.site/logo.png",
+    "website": "https://ashtemobile.site/",
+    "patreonURL": "https://ashtemobile.site/Ashtemobile.json",
+    "tintColor": "#ff007f",
+    "featuredApps": [],
+    "headerURL": "https://ashtemobile.site/logo.png",
+    "apps": [
+        {
+            "id": 1159846171,
+            "name": "Virtual Families 3 - ashtemobile",
+            "version": "2.4.11",
+            "size": 151520979,
+            "icon": "img/virtualfamilies3.jpg",
+            "badge": "",
+            "type": "games",
+            "install_url": "https://github.com/ios94/ipaashte/releases/download/V.5/Virtual_Families_3.ipa",
+            "download_url": "https://github.com/ios94/ipaashte/releases/download/V.5/Virtual_Families_3.ipa",
+            "bundleIdentifier": "com.ldw.vf3",
+            "marketplaceID": "",
+            "developerName": "AshteMobile",
+            "subtitle": "Awesome App",
+            "localizedDescription": "Genre: Games, Family, Entertainment, Simulation",
+            "iconURL": "https://raw.githubusercontent.com/ios94/ipaashte/main/img/virtualfamilies3.jpg",
+            "tintColor": "#04ecfc",
+            "category": "games",
+            "screenshotURLs": [
+                "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_1.jpg",
+                "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_2.jpg",
+                "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_3.jpg",
+                "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_4.jpg",
+                "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_5.jpg"
+            ],
+            "screenshots": [
+                "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_1.jpg",
+                "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_2.jpg",
+                "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_3.jpg",
+                "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_4.jpg",
+                "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_5.jpg"
+            ],
+            "versions": [
+                {
+                    "version": "2.4.11",
+                    "date": "2026-11-18T10:52:57+00:00",
+                    "localizedDescription": null,
+                    "downloadURL": "https://github.com/ios94/ipaashte/releases/download/V.5/Virtual_Families_3.ipa",
+                    "size": 151520979,
+                    "buildVersion": "0",
+                    "minOSVersion": "15.0",
+                    "screenshots": [
+                        "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_1.jpg",
+                        "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_2.jpg",
+                        "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_3.jpg",
+                        "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_4.jpg",
+                        "https://raw.githubusercontent.com/ios94/ipaashte/main/imgg/virtualfamilies3_screen_5.jpg"
+                    ]
+                }
+            ]
+        }
+    ]
+}
