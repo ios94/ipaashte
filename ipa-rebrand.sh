@@ -982,231 +982,6 @@ if [[ "$SKIP_EXISTING" == "true" && "$GAME" == "all" ]]; then
   gh release view "$TO_TAG" -R "$REPO" --json assets -q '.assets[].name' >"$EXISTING" 2>/dev/null || true
 fi
 
-MAP="$WORK/map.tsv"   # input IPA name <TAB> name inside the TO_TAG release (used for ashte.json)
-: > "$MAP"
-
-for ipa in "$WORK"/in/*.ipa; do
-  fname="$(basename "$ipa")"
-  if grep -Fxq "$fname" "$EXISTING"; then
-    echo "== Skipping (already in $TO_TAG): $fname"
-    printf '%s\t%s\n' "$fname" "$fname" >> "$MAP"
-    continue
-  fi
-  echo "=========================================="
-  echo "== Processing: $fname"
-  T="$WORK/tmp"
-  rm -rf "$T"
-  mkdir -p "$T"
-  unzip -q "$ipa" -d "$T"
-  APP="$(ls -d "$T"/Payload/*.app | head -n1)"
-
-  # 0) Build a clean output file name (game name instead of long hash names)
-  CLEAN="$(python3 - "$APP/Info.plist" "$fname" "$NEW_NAME" <<'PY'
-import plistlib, sys, re
-path, fname, new_name = sys.argv[1:4]
-n = ''
-try:
-    with open(path, 'rb') as f:
-        d = plistlib.load(f)
-    n = d.get('CFBundleDisplayName') or d.get('CFBundleName') or ''
-except Exception:
-    pass
-if not n or new_name not in ('', 'keep', 'My App'):
-    n = re.sub(r'\.ipa$', '', fname, flags=re.I)
-    n = re.sub(r'^[0-9a-f]{32}_', '', n)
-    n = re.sub(r'^ashte_', '', n)
-    n = re.sub(r'\.signed$', '', n)
-    n = re.sub(r'_\d+_com.*$', '', n)
-n = re.sub(r'[^A-Za-z0-9._-]+', '_', n).strip('._') or 'app'
-print(n + '.ipa')
-PY
-)"
-  echo "== Output name: $CLEAN"
-  if grep -Fxq "$CLEAN" "$EXISTING"; then
-    echo "== Skipping (already in $TO_TAG): $CLEAN"
-    printf '%s\t%s\n' "$fname" "$CLEAN" >> "$MAP"
-    continue
-  fi
-
-  # 1) Keep original game name unless user explicitly typed a custom name
-  if [[ -n "$NEW_NAME" && "$NEW_NAME" != "My App" && "$NEW_NAME" != "keep" ]]; then
-    python3 - "$APP/Info.plist" "$NEW_NAME" <<'PY'
-import plistlib, sys
-path, name = sys.argv[1:3]
-with open(path, 'rb') as f:
-    raw = f.read()
-is_bin = raw.startswith(b'bplist')
-d = plistlib.loads(raw)
-d['CFBundleDisplayName'] = name
-d['CFBundleName'] = name
-with open(path, 'wb') as f:
-    plistlib.dump(d, f, fmt=plistlib.FMT_BINARY if is_bin else plistlib.FMT_XML)
-PY
-  fi
-
-  # 2) Patch embedded base64 icons & plain text titles inside ANY dylib or framework binary
-  python3 - "$APP" "$MENU_ICON" "$MENU_TITLE" <<'PY'
-import sys, os, re, io, base64, struct, zlib
-from PIL import Image
-
-app, icon_path, title = sys.argv[1:4]
-B64 = re.compile(rb'iVBORw0KGgo[A-Za-z0-9+/]{80,}={0,2}')
-MACHO = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca')
-
-def chunk(t, d):
-    return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
-
-def png_size(blob):
-    i = blob.find(b'IHDR')
-    if i < 0 or len(blob) < i + 12:
-        return None
-    w, h = struct.unpack('>II', blob[i+4:i+12])
-    return (w, h) if (16 <= w <= 700 and 16 <= h <= 700) else None
-
-def looks_like_mascot(blob):
-    try:
-        im = Image.open(io.BytesIO(blob)).convert('RGBA')
-    except Exception:
-        return False
-    colors = im.convert('RGB').getcolors(maxcolors=1 << 24) or []
-    return len(colors) >= 15
-
-def make_png(target, w, h):
-    src = Image.open(icon_path).convert('RGBA')
-    s = 1.0
-    while True:
-        nw, nh = max(16, int(w * s)), max(16, int(h * s))
-        small = src.resize((nw, nh), Image.LANCZOS)
-        for im in (small, small.quantize(colors=128, method=Image.FASTOCTREE)):
-            buf = io.BytesIO()
-            im.save(buf, 'PNG', optimize=True)
-            b = buf.getvalue()
-            if len(b) == target:
-                return b
-            if len(b) + 20 <= target:
-                pad = target - len(b) - 20
-                return b[:-12] + chunk(b'tEXt', b'Comment\x00' + b'x' * pad) + b[-12:]
-        if nw <= 16:
-            return None
-        s *= 0.85
-
-rep20 = title.encode('utf-8')[:20].ljust(20, b' ')
-
-# Same-length replacement so Mach-O offsets never move (UTF-8 and UTF-16LE variants)
-def same_len(old_str, new_title, enc):
-    o = old_str.encode(enc)
-    unit = 2 if enc == 'utf-16-le' else 1
-    t = new_title.encode(enc)[:len(o)]
-    t = t + (' '.encode(enc)) * ((len(o) - len(t)) // unit)
-    return o, t
-
-NAME_VARIANTS = ("Check0ver Team", "CHECK0VER TEAM", "Check0ver team", "Checkover Team")
-
-for root, _, names in os.walk(app):
-    for n in names:
-        p = os.path.join(root, n)
-        if os.path.islink(p) or not os.path.isfile(p):
-            continue
-        low = n.lower()
-        if not (n.endswith(".dylib") or 'igamegod' in low or 'check0ver' in low or 'checkover' in low):
-            continue
-        with open(p, 'rb') as f:
-            data = f.read()
-        if data[:4] not in MACHO:
-            continue
-        new = bytearray(data)
-        patched = 0
-        for pat in (b"Made for iOSGods.com", b"made for iosgods.com"):
-            if pat in new:
-                new = bytearray(bytes(new).replace(pat, rep20))
-                patched += 1
-        for variant in NAME_VARIANTS:
-            for enc in ('utf-8', 'utf-16-le'):
-                o, r = same_len(variant, title, enc)
-                if o in new:
-                    new = bytearray(bytes(new).replace(o, r))
-                    patched += 1
-        for m in set(B64.findall(data)):
-            try:
-                orig = base64.b64decode(m)
-            except Exception:
-                continue
-            wh = png_size(orig)
-            if wh and looks_like_mascot(orig):
-                png = make_png(len(orig), wh[0], wh[1])
-                if png:
-                    nb = base64.b64encode(png)
-                    if len(nb) == len(m):
-                        new = bytearray(bytes(new).replace(m, nb))
-                        patched += 1
-        if bytes(new) != data:
-            with open(p, 'wb') as f:
-                f.write(bytes(new))
-            print(f"  Binary-patched {patched} item(s) in {os.path.relpath(p, app)}")
-PY
-
-  # 3) Place libashte.dylib inside Frameworks/ so ESign/Scarlet always signs it properly
-  mkdir -p "$APP/Frameworks"
-  cp "$WORK/libashte.dylib" "$APP/Frameworks/libashte.dylib"
-  resize "$MENU_ICON" 120 120 "$APP/ashte_menu_icon.png"
-
-  # 4) Inject @executable_path/Frameworks/libashte.dylib into all slices of mod dylibs & main executable
-  python3 - "$APP" <<'PY'
-import os, sys, plistlib, lief
-
-app = sys.argv[1]
-with open(os.path.join(app, "Info.plist"), "rb") as f:
-    main_exe = plistlib.load(f).get("CFBundleExecutable", "")
-
-targets = []
-for root, _, names in os.walk(app):
-    for n in names:
-        if n in ("libashte.dylib", "CydiaSubstrate.dylib", "libsubstitute.dylib"):
-            continue
-        if n.endswith(".dylib") or n == "iGameGod":
-            targets.append(os.path.join(root, n))
-
-main_path = os.path.join(app, main_exe)
-if os.path.isfile(main_path) and main_path not in targets:
-    targets.append(main_path)
-
-for t in targets:
-    rel = os.path.relpath(t, app)
-    try:
-        fat = lief.MachO.parse(t)
-        if fat:
-            for b in fat:
-                if any(getattr(l, "name", "") == "@executable_path/Frameworks/libashte.dylib" for l in b.libraries):
-                    continue
-                b.add_library("@executable_path/Frameworks/libashte.dylib")
-            fat.write(t)
-            print(f"  Injected @executable_path/Frameworks/libashte.dylib -> {rel}")
-    except Exception as e:
-        print(f"  Skipped {rel}: {e}")
-PY
-
-  # 5) Re-pack IPA with the clean name
-  (cd "$T" && zip -qry "$WORK/out/$CLEAN" Payload)
-  printf '%s\t%s\n' "$fname" "$CLEAN" >> "$MAP"
-done
-
-echo "== Uploading all rebranded IPAs to $TO_TAG"
-gh release view "$TO_TAG" -R "$REPO" >/dev/null 2>&1 || \
-  gh release create "$TO_TAG" -R "$REPO" -t "$TO_TAG" -n "Rebranded IPAs"
-shopt -s nullglob
-OUT_FILES=("$WORK"/out/*.ipa)
-if [[ ${#OUT_FILES[@]} -eq 0 ]]; then
-  echo "Nothing new to upload."
-else
-  gh release upload "$TO_TAG" "${OUT_FILES[@]}" -R "$REPO" --clobber
-fi
-
-# ---------------------------------------------------------------
-# Build / update ashte.json (AltStore-style source) + img/ + imgg/
-# ---------------------------------------------------------------
-gh release view "$TO_TAG" -R "$REPO" --json assets > "$WORK/assets.json" 2>/dev/null \
-  || echo '{"assets":[]}' > "$WORK/assets.json"
-
 cat > "$WORK/make_source.py" <<'PYSRC'
 import os, sys, json, re, zipfile, plistlib, hashlib, difflib, datetime
 import urllib.request, urllib.parse
@@ -1398,6 +1173,42 @@ def get_shots(urls, slug):
     return out
 
 
+SUFFIX = os.environ.get("NAME_SUFFIX", " - ashtemobile")
+NEW_NAME = os.environ.get("NEW_NAME", "keep").strip()
+
+
+def resolve_name(bundle, plist_name, page_link=""):
+    """App name = real name (from the page's App Store link, or the App Store) + ' - ashtemobile'.
+    Returns (name, found_in_app_store)."""
+    if NEW_NAME and NEW_NAME.lower() not in ("keep", "my app"):
+        return NEW_NAME, True
+    store = None
+    if page_link:
+        store = scrape_page(page_link)["store"]
+    if not store:
+        store = appstore(bundle, plist_name)
+    base = (store or {}).get("trackName") or plist_name or ""
+    # drop a marketing subtitle such as "Game Name - Idle Adventure"
+    base = re.split(r"\s+[-–—]\s+", base)[0].strip() or (plist_name or "App")
+    if not base.lower().endswith(SUFFIX.strip().lower()):
+        base += SUFFIX
+    return base, bool(store)
+
+
+# command line mode used by the shell script:  make_source.py --name <Info.plist>
+if len(sys.argv) >= 3 and sys.argv[1] == "--name":
+    sys.stdout = sys.stderr
+    try:
+        with open(sys.argv[2], "rb") as f:
+            pl = plistlib.load(f)
+        nm, _ = resolve_name(pl.get("CFBundleIdentifier", ""),
+                             pl.get("CFBundleDisplayName") or pl.get("CFBundleName") or "", PAGE_LINK)
+        sys.__stdout__.write(nm + "\n")
+    except Exception as e:
+        print("name lookup failed: %s" % e)
+    sys.exit(0)
+
+
 os.makedirs("img", exist_ok=True)
 os.makedirs("imgg", exist_ok=True)
 
@@ -1499,9 +1310,13 @@ for fname, out in pairs:
     icon_url = ("%s/%s" % (RAW, icon_rel)) if icon_rel else data["iconURL"]
     app_id = old.get("id") or (store or {}).get("trackId") or int(hashlib.md5(bundle.encode()).hexdigest()[:8], 16)
 
+    display, found = resolve_name(bundle, plist_name, PAGE_LINK if len(pairs) == 1 else "")
+    if not found and (old.get("name") or "").endswith(SUFFIX.strip()):
+        display = old["name"]
+
     entry = {
         "id": app_id,
-        "name": old.get("name") or (store or {}).get("trackName") or plist_name,
+        "name": display,
         "version": version,
         "size": size,
         "icon": icon_rel,
@@ -1539,8 +1354,237 @@ with open(OUT_JSON, "w", encoding="utf-8") as f:
 print("== %s written: %d app(s)" % (OUT_JSON, len(data["apps"])))
 PYSRC
 
+MAP="$WORK/map.tsv"   # input IPA name <TAB> name inside the TO_TAG release (used for ashte.json)
+: > "$MAP"
+
+for ipa in "$WORK"/in/*.ipa; do
+  fname="$(basename "$ipa")"
+  if grep -Fxq "$fname" "$EXISTING"; then
+    echo "== Skipping (already in $TO_TAG): $fname"
+    printf '%s\t%s\n' "$fname" "$fname" >> "$MAP"
+    continue
+  fi
+  echo "=========================================="
+  echo "== Processing: $fname"
+  T="$WORK/tmp"
+  rm -rf "$T"
+  mkdir -p "$T"
+  unzip -q "$ipa" -d "$T"
+  APP="$(ls -d "$T"/Payload/*.app | head -n1)"
+
+  # 0) Build a clean output file name (game name instead of long hash names)
+  CLEAN="$(python3 - "$APP/Info.plist" "$fname" "$NEW_NAME" <<'PY'
+import plistlib, sys, re
+path, fname, new_name = sys.argv[1:4]
+n = ''
+try:
+    with open(path, 'rb') as f:
+        d = plistlib.load(f)
+    n = d.get('CFBundleDisplayName') or d.get('CFBundleName') or ''
+except Exception:
+    pass
+if not n or new_name not in ('', 'keep', 'My App'):
+    n = re.sub(r'\.ipa$', '', fname, flags=re.I)
+    n = re.sub(r'^[0-9a-f]{32}_', '', n)
+    n = re.sub(r'^ashte_', '', n)
+    n = re.sub(r'\.signed$', '', n)
+    n = re.sub(r'_\d+_com.*$', '', n)
+n = re.sub(r'[^A-Za-z0-9._-]+', '_', n).strip('._') or 'app'
+print(n + '.ipa')
+PY
+)"
+  echo "== Output name: $CLEAN"
+  if grep -Fxq "$CLEAN" "$EXISTING"; then
+    echo "== Skipping (already in $TO_TAG): $CLEAN"
+    printf '%s\t%s\n' "$fname" "$CLEAN" >> "$MAP"
+    continue
+  fi
+
+  # 1) App name: "<real game name> - ashtemobile" (found from the page / App Store), or the custom name typed
+  APPDISP="$(WORK="$WORK" REPO="$REPO" TO_TAG="$TO_TAG" NEW_NAME="$NEW_NAME" PAGE_LINK="${IPA_LINK:+$PAGE_LINK}" \
+    python3 "$WORK/make_source.py" --name "$APP/Info.plist" 2>/dev/null || true)"
+  if [[ -n "$APPDISP" ]]; then
+    echo "== App name: $APPDISP"
+    python3 - "$APP/Info.plist" "$APPDISP" <<'PY'
+import plistlib, sys
+path, name = sys.argv[1:3]
+with open(path, 'rb') as f:
+    raw = f.read()
+is_bin = raw.startswith(b'bplist')
+d = plistlib.loads(raw)
+d['CFBundleDisplayName'] = name
+d['CFBundleName'] = name
+with open(path, 'wb') as f:
+    plistlib.dump(d, f, fmt=plistlib.FMT_BINARY if is_bin else plistlib.FMT_XML)
+PY
+  fi
+
+  # 2) Patch embedded base64 icons & plain text titles inside ANY dylib or framework binary
+  python3 - "$APP" "$MENU_ICON" "$MENU_TITLE" <<'PY'
+import sys, os, re, io, base64, struct, zlib
+from PIL import Image
+
+app, icon_path, title = sys.argv[1:4]
+B64 = re.compile(rb'iVBORw0KGgo[A-Za-z0-9+/]{80,}={0,2}')
+MACHO = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca')
+
+def chunk(t, d):
+    return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+
+def png_size(blob):
+    i = blob.find(b'IHDR')
+    if i < 0 or len(blob) < i + 12:
+        return None
+    w, h = struct.unpack('>II', blob[i+4:i+12])
+    return (w, h) if (16 <= w <= 700 and 16 <= h <= 700) else None
+
+def looks_like_mascot(blob):
+    try:
+        im = Image.open(io.BytesIO(blob)).convert('RGBA')
+    except Exception:
+        return False
+    colors = im.convert('RGB').getcolors(maxcolors=1 << 24) or []
+    return len(colors) >= 15
+
+def make_png(target, w, h):
+    src = Image.open(icon_path).convert('RGBA')
+    s = 1.0
+    while True:
+        nw, nh = max(16, int(w * s)), max(16, int(h * s))
+        small = src.resize((nw, nh), Image.LANCZOS)
+        for im in (small, small.quantize(colors=128, method=Image.FASTOCTREE)):
+            buf = io.BytesIO()
+            im.save(buf, 'PNG', optimize=True)
+            b = buf.getvalue()
+            if len(b) == target:
+                return b
+            if len(b) + 20 <= target:
+                pad = target - len(b) - 20
+                return b[:-12] + chunk(b'tEXt', b'Comment\x00' + b'x' * pad) + b[-12:]
+        if nw <= 16:
+            return None
+        s *= 0.85
+
+rep20 = title.encode('utf-8')[:20].ljust(20, b' ')
+
+# Same-length replacement so Mach-O offsets never move (UTF-8 and UTF-16LE variants)
+def same_len(old_str, new_title, enc):
+    o = old_str.encode(enc)
+    unit = 2 if enc == 'utf-16-le' else 1
+    t = new_title.encode(enc)[:len(o)]
+    t = t + (' '.encode(enc)) * ((len(o) - len(t)) // unit)
+    return o, t
+
+NAME_VARIANTS = ("Check0ver Team", "CHECK0VER TEAM", "Check0ver team", "Checkover Team")
+
+for root, _, names in os.walk(app):
+    for n in names:
+        p = os.path.join(root, n)
+        if os.path.islink(p) or not os.path.isfile(p):
+            continue
+        low = n.lower()
+        if not (n.endswith(".dylib") or 'igamegod' in low or 'check0ver' in low or 'checkover' in low):
+            continue
+        with open(p, 'rb') as f:
+            data = f.read()
+        if data[:4] not in MACHO:
+            continue
+        new = bytearray(data)
+        patched = 0
+        for pat in (b"Made for iOSGods.com", b"made for iosgods.com"):
+            if pat in new:
+                new = bytearray(bytes(new).replace(pat, rep20))
+                patched += 1
+        for variant in NAME_VARIANTS:
+            for enc in ('utf-8', 'utf-16-le'):
+                o, r = same_len(variant, title, enc)
+                if o in new:
+                    new = bytearray(bytes(new).replace(o, r))
+                    patched += 1
+        for m in set(B64.findall(data)):
+            try:
+                orig = base64.b64decode(m)
+            except Exception:
+                continue
+            wh = png_size(orig)
+            if wh and looks_like_mascot(orig):
+                png = make_png(len(orig), wh[0], wh[1])
+                if png:
+                    nb = base64.b64encode(png)
+                    if len(nb) == len(m):
+                        new = bytearray(bytes(new).replace(m, nb))
+                        patched += 1
+        if bytes(new) != data:
+            with open(p, 'wb') as f:
+                f.write(bytes(new))
+            print(f"  Binary-patched {patched} item(s) in {os.path.relpath(p, app)}")
+PY
+
+  # 3) Place libashte.dylib inside Frameworks/ so ESign/Scarlet always signs it properly
+  mkdir -p "$APP/Frameworks"
+  cp "$WORK/libashte.dylib" "$APP/Frameworks/libashte.dylib"
+  resize "$MENU_ICON" 120 120 "$APP/ashte_menu_icon.png"
+
+  # 4) Inject @executable_path/Frameworks/libashte.dylib into all slices of mod dylibs & main executable
+  python3 - "$APP" <<'PY'
+import os, sys, plistlib, lief
+
+app = sys.argv[1]
+with open(os.path.join(app, "Info.plist"), "rb") as f:
+    main_exe = plistlib.load(f).get("CFBundleExecutable", "")
+
+targets = []
+for root, _, names in os.walk(app):
+    for n in names:
+        if n in ("libashte.dylib", "CydiaSubstrate.dylib", "libsubstitute.dylib"):
+            continue
+        if n.endswith(".dylib") or n == "iGameGod":
+            targets.append(os.path.join(root, n))
+
+main_path = os.path.join(app, main_exe)
+if os.path.isfile(main_path) and main_path not in targets:
+    targets.append(main_path)
+
+for t in targets:
+    rel = os.path.relpath(t, app)
+    try:
+        fat = lief.MachO.parse(t)
+        if fat:
+            for b in fat:
+                if any(getattr(l, "name", "") == "@executable_path/Frameworks/libashte.dylib" for l in b.libraries):
+                    continue
+                b.add_library("@executable_path/Frameworks/libashte.dylib")
+            fat.write(t)
+            print(f"  Injected @executable_path/Frameworks/libashte.dylib -> {rel}")
+    except Exception as e:
+        print(f"  Skipped {rel}: {e}")
+PY
+
+  # 5) Re-pack IPA with the clean name
+  (cd "$T" && zip -qry "$WORK/out/$CLEAN" Payload)
+  printf '%s\t%s\n' "$fname" "$CLEAN" >> "$MAP"
+done
+
+echo "== Uploading all rebranded IPAs to $TO_TAG"
+gh release view "$TO_TAG" -R "$REPO" >/dev/null 2>&1 || \
+  gh release create "$TO_TAG" -R "$REPO" -t "$TO_TAG" -n "Rebranded IPAs"
+shopt -s nullglob
+OUT_FILES=("$WORK"/out/*.ipa)
+if [[ ${#OUT_FILES[@]} -eq 0 ]]; then
+  echo "Nothing new to upload."
+else
+  gh release upload "$TO_TAG" "${OUT_FILES[@]}" -R "$REPO" --clobber
+fi
+
+# ---------------------------------------------------------------
+# Build / update ashte.json (AltStore-style source) + img/ + imgg/
+# ---------------------------------------------------------------
+gh release view "$TO_TAG" -R "$REPO" --json assets > "$WORK/assets.json" 2>/dev/null \
+  || echo '{"assets":[]}' > "$WORK/assets.json"
+
+
 echo "== Building ashte.json"
-WORK="$WORK" REPO="$REPO" TO_TAG="$TO_TAG" BRANCH="${BRANCH:-main}" PAGE_LINK="${IPA_LINK:+$PAGE_LINK}" SOURCE_FILE="${SOURCE_FILE:-ashte.json}" \
+WORK="$WORK" REPO="$REPO" TO_TAG="$TO_TAG" BRANCH="${BRANCH:-main}" PAGE_LINK="${IPA_LINK:+$PAGE_LINK}" NEW_NAME="$NEW_NAME" SOURCE_FILE="${SOURCE_FILE:-ashte.json}" \
   python3 "$WORK/make_source.py" || echo "WARNING: ashte.json step failed (IPAs were uploaded normally)"
 
 rm -rf "$WORK/tmp"
